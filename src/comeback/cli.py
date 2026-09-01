@@ -41,9 +41,12 @@ def _parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     sub.add_parser("init")
+    sub.add_parser("status")
 
     prepare = sub.add_parser("prepare-intervention")
-    prepare.add_argument("--session-id", required=True)
+    source_session = prepare.add_mutually_exclusive_group(required=True)
+    source_session.add_argument("--session-id")
+    source_session.add_argument("--latest", action="store_true")
     prepare.add_argument("--authorized-closer", required=True)
     prepare.add_argument("--summary", required=True)
     prepare.add_argument("--task-class", default="release")
@@ -69,7 +72,9 @@ def _parser() -> argparse.ArgumentParser:
     inspect.add_argument("--agent-family", default="Codex")
 
     approval_message_parser = sub.add_parser("prepare-approval")
-    approval_message_parser.add_argument("--session-id", required=True)
+    approval_source = approval_message_parser.add_mutually_exclusive_group(required=True)
+    approval_source.add_argument("--session-id")
+    approval_source.add_argument("--latest", action="store_true")
     approval_message_parser.add_argument("--approved-at")
 
     approve = sub.add_parser("approve")
@@ -86,21 +91,42 @@ def main() -> None:
             print(json.dumps(install_repository(args.repo), indent=2, sort_keys=True))
             return
         memory, repo_id = _memory(args)
-        if args.command == "prepare-intervention":
+        if args.command == "status":
+            result = {
+                "repo_id": repo_id,
+                "runs": memory.list_runs(),
+                "lessons": memory.matching_lessons("release", "release_workflow", "Codex"),
+                "inspected_at": utc_now(),
+            }
+        elif args.command == "prepare-intervention":
             closer = args.authorized_closer.lower()
             if not closer.startswith("0x") or len(closer) != 42:
                 raise MemoryIntegrityError("authorized closer must be an Ethereum address")
+            if args.latest:
+                runs = memory.list_runs(limit=1)
+                if not runs:
+                    raise MemoryIntegrityError("no recent Sibyl supervision run exists")
+                source_run = runs[0]
+                source_session_id = source_run["session_id"]
+                task_class = source_run["task_class"]
+                area = source_run["area"]
+                agent_family = source_run["agent_family"]
+            else:
+                source_session_id = args.session_id
+                task_class = args.task_class
+                area = args.area
+                agent_family = args.agent_family
             signed_fields = {
-                "lesson_id": f"{args.task_class}-{args.area}-{args.agent_family.lower()}",
+                "lesson_id": f"{task_class}-{area}-{agent_family.lower()}",
                 "repo_id": repo_id,
-                "task_class": args.task_class,
-                "area": args.area,
-                "agent_family": args.agent_family,
+                "task_class": task_class,
+                "area": area,
+                "agent_family": agent_family,
                 "severity": args.severity,
                 "checkpoint_command": args.checkpoint_command.strip(),
                 "required_evidence": ["release_check_passed", "human_approval"],
                 "authorized_closer": closer,
-                "source_session_id": args.session_id,
+                "source_session_id": source_session_id,
                 "incident_at": utc_now(),
             }
             result = {
@@ -114,12 +140,20 @@ def main() -> None:
         elif args.command == "intervene":
             result = memory.record_intervention(_intervention_record(args))
         elif args.command == "prepare-approval":
-            run = memory.get_run(args.session_id)
+            if args.latest:
+                runs = memory.list_runs(limit=1)
+                if not runs:
+                    raise MemoryIntegrityError("no recent Sibyl supervision run exists")
+                run = runs[0]
+                approval_session_id = run["session_id"]
+            else:
+                approval_session_id = args.session_id
+                run = memory.get_run(approval_session_id)
             approved_at = args.approved_at or utc_now()
             result = {
                 "approved_at": approved_at,
                 "message_to_sign": approval_message(run, approved_at),
-                "session_id": args.session_id,
+                "session_id": approval_session_id,
                 "remaining": memory.missing_requirements(run),
             }
         elif args.command == "approve":

@@ -60,3 +60,33 @@ def test_prepare_sign_and_record_intervention(tmp_path: Path):
     )
     assert lesson["current_mode"] == "HUMAN_REQUIRED"
     assert fresh["mode"] == "HUMAN_REQUIRED"
+
+
+def test_prepare_latest_uses_recent_sibyl_run(tmp_path: Path):
+    owner = Account.create()
+    _, repo_id = repository_identity(tmp_path)
+    memory = InterventionMemory(tmp_path / ".comeback" / "memory.db", repo_id)
+    memory.start_run(
+        session_id="latest-corrected-session",
+        task_class="release",
+        area="release_workflow",
+        agent_family="Codex",
+        model="test",
+    )
+    prepared = run_cli(
+        tmp_path,
+        "prepare-intervention",
+        "--latest",
+        "--authorized-closer",
+        owner.address,
+        "--summary",
+        "The agent skipped the release gate.",
+        "--checkpoint-command",
+        "pnpm run release:check",
+    )
+    fields = prepared["record_template"]["signed_fields"]
+    status = run_cli(tmp_path, "status")
+    approval = run_cli(tmp_path, "prepare-approval", "--latest")
+    assert fields["source_session_id"] == "latest-corrected-session"
+    assert status["runs"][0]["session_id"] == "latest-corrected-session"
+    assert approval["session_id"] == "latest-corrected-session"

@@ -30,22 +30,38 @@ To turn a real human correction into enforceable memory:
 
 ```bash
 comeback prepare-intervention \
-  --session-id <corrected-codex-session> \
+  --latest \
   --authorized-closer <ethereum-address> \
   --summary "Agent attempted release before the required check" \
   --checkpoint-command "pnpm test && pnpm run release:check" \
   > comeback-intervention.json
 ```
 
+`comeback status` shows recent Sibyl-backed runs and their session IDs. `--latest` binds the intervention to the most recently updated run; use `--session-id` when selecting an older correction.
+
 Sign the exact `message_to_sign` with the authorized address using an ERC-191-compatible wallet, then record it:
 
 ```bash
+signature=$(cast wallet sign --interactive "$(jq -r .message_to_sign comeback-intervention.json)")
 comeback intervene \
   --record-file comeback-intervention.json \
-  --signature <wallet-signature>
+  --signature "$signature"
 ```
 
 The wallet never authorizes a transaction. Its signature prevents the coding agent, repository content, or another user from inventing or closing an intervention.
+
+In the fresh supervised session, run the exact checkpoint Comeback recalls. For `HUMAN_REQUIRED`, prepare and sign the approval from a separate terminal:
+
+```bash
+comeback prepare-approval --latest > comeback-approval.json
+approval_signature=$(cast wallet sign --interactive "$(jq -r .message_to_sign comeback-approval.json)")
+comeback approve \
+  --session-id "$(jq -r .session_id comeback-approval.json)" \
+  --approved-at "$(jq -r .approved_at comeback-approval.json)" \
+  --signature "$approval_signature"
+```
+
+`cast wallet sign --interactive` keeps the private key out of shell history. A Ledger, Trezor, encrypted Foundry keystore, AWS KMS, GCP KMS, Turnkey, or another ERC-191 wallet can sign the same message instead. Never pass a raw production private key on the command line.
 
 ## Where Sibyl is load-bearing
 
