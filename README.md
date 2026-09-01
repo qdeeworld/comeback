@@ -16,6 +16,36 @@ This repository is a bounded Sibyl hackathon validation spike, not a finished pr
 
 Unrelated low-risk work remains `AUTONOMOUS`.
 
+## Install in a repository
+
+```bash
+pipx install git+https://github.com/qdeeworld/comeback.git
+cd your-repository
+comeback init
+```
+
+`comeback init` merges Comeback into an existing `.codex/hooks.json`, installs the narrow release-safety Skill, and ignores the repository-local Sibyl database. It does not overwrite unrelated hooks or Skills. Open Codex in that repository, run `/hooks`, and trust the reviewed Comeback definition as required by Codex.
+
+To turn a real human correction into enforceable memory:
+
+```bash
+comeback prepare-intervention \
+  --session-id <corrected-codex-session> \
+  --authorized-closer <ethereum-address> \
+  --summary "Agent attempted release before the required check" \
+  > comeback-intervention.json
+```
+
+Sign the exact `message_to_sign` with the authorized address using an ERC-191-compatible wallet, then record it:
+
+```bash
+comeback intervene \
+  --record-file comeback-intervention.json \
+  --signature <wallet-signature>
+```
+
+The wallet never authorizes a transaction. Its signature prevents the coding agent, repository content, or another user from inventing or closing an intervention.
+
 ## Where Sibyl is load-bearing
 
 Sibyl is the only store for repository-specific intervention lessons, supervision runs, required checkpoints, approvals and outcomes. The hooks contain generic task classification and enforcement mechanics but no copied intervention or mode.
