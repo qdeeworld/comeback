@@ -3,5 +3,7 @@
 __pycache__/
 *.pyc
 *.egg-info/
+build/
+dist/
 .comeback/
 release-executed.json
