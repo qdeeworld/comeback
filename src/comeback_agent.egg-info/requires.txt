@@ -1,6 +1,0 @@
-eth-account<0.14,>=0.13
-sibyl-memory-client==0.8.0
-
-[dev]
-pytest<9,>=8
-pyyaml<7,>=6

@@ -2,6 +2,6 @@
 .pytest_cache/
 __pycache__/
 *.pyc
+*.egg-info/
 .comeback/
 release-executed.json
-
