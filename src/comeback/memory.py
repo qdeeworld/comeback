@@ -198,6 +198,13 @@ class InterventionMemory:
             raise MemoryIntegrityError("no Sibyl supervision run exists for this session") from exc
         return validate_run(entity.get("body"))
 
+    def list_runs(self, *, limit: int = 20) -> list[dict[str, Any]]:
+        runs = [
+            validate_run(entity.get("body"))
+            for entity in self.client.list_entities(self.RUN_CATEGORY, limit=limit)
+        ]
+        return sorted(runs, key=lambda run: run.get("updated_at", ""), reverse=True)
+
     def add_evidence(self, session_id: str, evidence: str) -> dict[str, Any]:
         run = self.get_run(session_id)
         if run["status"] != "open":
