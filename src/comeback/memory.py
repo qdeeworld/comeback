@@ -32,7 +32,7 @@ def validate_lesson(body: Any) -> dict[str, Any]:
         raise MemoryIntegrityError("lesson body is corrupted")
     required_strings = (
         "lesson_id", "repo_id", "task_class", "area", "agent_family",
-        "severity", "current_mode", "authorized_closer", "source_session_id",
+        "severity", "checkpoint_command", "current_mode", "authorized_closer", "source_session_id",
         "incident_at", "updated_at", "status",
     )
     for field in required_strings:
@@ -69,6 +69,8 @@ def validate_run(body: Any) -> dict[str, Any]:
     if body["mode"] not in MODES:
         raise MemoryIntegrityError("run mode is invalid")
     run = deepcopy(body)
+    if not isinstance(run.get("checkpoint_command"), str):
+        raise MemoryIntegrityError("run checkpoint_command is invalid")
     run["lesson_ids"] = _strings(run.get("lesson_ids"), "lesson_ids")
     run["required_evidence"] = _strings(run.get("required_evidence"), "required_evidence")
     run["satisfied_evidence"] = _strings(run.get("satisfied_evidence"), "satisfied_evidence")
@@ -158,6 +160,9 @@ class InterventionMemory:
             if existing["status"] == "open":
                 return existing
         lessons = self.matching_lessons(task_class, area, agent_family)
+        checkpoint_commands = {lesson["checkpoint_command"].strip() for lesson in lessons}
+        if len(checkpoint_commands) > 1:
+            raise MemoryIntegrityError("conflicting remembered checkpoint commands require operator resolution")
         rank = {"AUTONOMOUS": 0, "CHECKPOINTED": 1, "HUMAN_REQUIRED": 2}
         mode = max((lesson["current_mode"] for lesson in lessons), key=rank.get, default="AUTONOMOUS")
         run = {
@@ -170,6 +175,7 @@ class InterventionMemory:
             "process_id": process_id,
             "mode": mode,
             "lesson_ids": sorted(lesson["lesson_id"] for lesson in lessons),
+            "checkpoint_command": next(iter(checkpoint_commands), ""),
             "required_evidence": requirements_for_mode(mode),
             "satisfied_evidence": [],
             "status": "open",

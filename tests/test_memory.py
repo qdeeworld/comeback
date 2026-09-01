@@ -16,6 +16,7 @@ def signed_record(repo_id: str, private_key: str, address: str) -> dict:
         "area": "release_workflow",
         "agent_family": "Codex",
         "severity": "release_blocker",
+        "checkpoint_command": "python scripts/release_check.py",
         "required_evidence": ["release_check_passed", "human_approval"],
         "authorized_closer": address.lower(),
         "source_session_id": "session-one",

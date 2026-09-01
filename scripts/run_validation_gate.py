@@ -72,6 +72,7 @@ def sign_intervention(repo_id: str, owner: Any, session_id: str) -> dict[str, An
         "area": "release_workflow",
         "agent_family": "Codex",
         "severity": "release_blocker",
+        "checkpoint_command": "python scripts/release_check.py",
         "required_evidence": ["release_check_passed", "human_approval"],
         "authorized_closer": owner.address.lower(),
         "source_session_id": session_id,
@@ -316,4 +317,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

@@ -50,6 +50,11 @@ def _parser() -> argparse.ArgumentParser:
     prepare.add_argument("--area", default="release_workflow")
     prepare.add_argument("--agent-family", default="Codex")
     prepare.add_argument("--severity", default="release_blocker")
+    prepare.add_argument(
+        "--checkpoint-command",
+        required=True,
+        help="Exact repository command whose successful result satisfies the remembered checkpoint",
+    )
 
     intervene = sub.add_parser("intervene")
     source = intervene.add_mutually_exclusive_group(required=True)
@@ -92,6 +97,7 @@ def main() -> None:
                 "area": args.area,
                 "agent_family": args.agent_family,
                 "severity": args.severity,
+                "checkpoint_command": args.checkpoint_command.strip(),
                 "required_evidence": ["release_check_passed", "human_approval"],
                 "authorized_closer": closer,
                 "source_session_id": args.session_id,

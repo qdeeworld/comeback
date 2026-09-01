@@ -35,6 +35,7 @@ def main() -> None:
         "area": "release_workflow",
         "agent_family": "Codex",
         "severity": "release_blocker",
+        "checkpoint_command": "python scripts/release_check.py",
         "required_evidence": ["release_check_passed", "human_approval"],
         "authorized_closer": owner.address.lower(),
         "source_session_id": source_session,
@@ -116,4 +117,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

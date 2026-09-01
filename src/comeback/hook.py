@@ -8,7 +8,7 @@ from typing import Any
 
 from .identity import repository_identity
 from .memory import InterventionMemory, MemoryIntegrityError
-from .policy import classify_task, is_release_action, is_release_check, tool_succeeded
+from .policy import classify_task, command_from_event, is_release_action, tool_succeeded
 
 
 def _database(root: Path) -> Path:
@@ -23,9 +23,11 @@ def _agent_family(_: dict[str, Any]) -> str:
 def _context(run: dict[str, Any]) -> str:
     lessons = len(run["lesson_ids"])
     requirements = ", ".join(run["required_evidence"]) or "none"
+    checkpoint = run.get("checkpoint_command") or "none"
     return (
         f"Comeback supervision: {run['mode']}. "
         f"Recalled intervention lessons: {lessons}. Required evidence: {requirements}. "
+        f"Remembered checkpoint command: {checkpoint}. "
         "Do not claim completion while this run remains open."
     )
 
@@ -89,7 +91,17 @@ def handle(event: dict[str, Any]) -> dict[str, Any] | None:
             }
         }
 
-    if event_name == "PostToolUse" and is_release_check(event):
+    if event_name == "PostToolUse" and event.get("tool_name") == "Bash":
+        try:
+            run = memory.get_run(session_id)
+        except MemoryIntegrityError:
+            run = None
+        checkpoint_command = run.get("checkpoint_command", "") if run else ""
+        is_checkpoint = bool(checkpoint_command) and command_from_event(event).strip() == checkpoint_command.strip()
+    else:
+        is_checkpoint = False
+
+    if event_name == "PostToolUse" and is_checkpoint:
         if tool_succeeded(event):
             run = memory.add_evidence(session_id, "release_check_passed")
             return {

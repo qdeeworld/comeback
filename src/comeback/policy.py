@@ -19,7 +19,6 @@ _RELEASE_ACTIONS = (
     re.compile(r"\bforge\s+script\b.*\s--broadcast\b", re.IGNORECASE),
     re.compile(r"\brelease_candidate\.py\b", re.IGNORECASE),
 )
-_RELEASE_CHECK = re.compile(r"\brelease_check\.py\b", re.IGNORECASE)
 
 
 def classify_task(prompt: str) -> tuple[str, str]:
@@ -41,12 +40,6 @@ def is_release_action(event: dict[str, Any]) -> bool:
         return False
     command = command_from_event(event)
     return any(pattern.search(command) for pattern in _RELEASE_ACTIONS)
-
-
-def is_release_check(event: dict[str, Any]) -> bool:
-    return event.get("tool_name") == "Bash" and bool(
-        _RELEASE_CHECK.search(command_from_event(event))
-    )
 
 
 def tool_succeeded(event: dict[str, Any]) -> bool:
@@ -78,4 +71,3 @@ def requirements_for_mode(mode: str) -> list[str]:
     if mode == "CHECKPOINTED":
         return ["release_check_passed"]
     return []
-

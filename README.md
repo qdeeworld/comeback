@@ -33,6 +33,7 @@ comeback prepare-intervention \
   --session-id <corrected-codex-session> \
   --authorized-closer <ethereum-address> \
   --summary "Agent attempted release before the required check" \
+  --checkpoint-command "pnpm test && pnpm run release:check" \
   > comeback-intervention.json
 ```
 

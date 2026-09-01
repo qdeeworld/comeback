@@ -32,6 +32,8 @@ def test_prepare_sign_and_record_intervention(tmp_path: Path):
         owner.address,
         "--summary",
         "The agent skipped the release check.",
+        "--checkpoint-command",
+        "python -m pytest -q",
     )
     signature = Account.sign_message(
         encode_defunct(text=prepared["message_to_sign"]), private_key=owner.key
@@ -58,4 +60,3 @@ def test_prepare_sign_and_record_intervention(tmp_path: Path):
     )
     assert lesson["current_mode"] == "HUMAN_REQUIRED"
     assert fresh["mode"] == "HUMAN_REQUIRED"
-
