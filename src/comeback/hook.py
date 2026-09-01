@@ -76,7 +76,15 @@ def handle(event: dict[str, Any]) -> dict[str, Any] | None:
         except MemoryIntegrityError as exc:
             return _deny(f"Comeback fail-closed: {exc}")
         if run["task_class"] != "release":
-            return _deny("Comeback blocked a release action outside a release-class supervision run.")
+            run = memory.start_run(
+                session_id=session_id,
+                task_class="release",
+                area="release_workflow",
+                agent_family=_agent_family(event),
+                model=str(event.get("model", "unknown")),
+                process_id=os.getpid(),
+                force=True,
+            )
         missing = memory.missing_requirements(run)
         if missing:
             return _deny(

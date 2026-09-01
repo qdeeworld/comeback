@@ -70,3 +70,53 @@ def test_only_signed_repository_checkpoint_satisfies_gate(tmp_path: Path, monkey
         "release_check_passed"
     ]
 
+
+def test_release_action_promotes_vague_prompt_and_recalls_lesson(tmp_path: Path, monkeypatch):
+    db = tmp_path / "memory.db"
+    monkeypatch.setenv("COMEBACK_MEMORY_DB", str(db))
+    owner = Account.create()
+    _, repo_id = repository_identity(tmp_path)
+    signed_fields = {
+        "lesson_id": "release-release_workflow-codex",
+        "repo_id": repo_id,
+        "task_class": "release",
+        "area": "release_workflow",
+        "agent_family": "Codex",
+        "severity": "release_blocker",
+        "checkpoint_command": "./scripts/check-milestone.sh",
+        "required_evidence": ["release_check_passed", "human_approval"],
+        "authorized_closer": owner.address.lower(),
+        "source_session_id": "corrected-session",
+        "incident_at": datetime.now(timezone.utc).isoformat(),
+    }
+    signature = Account.sign_message(
+        encode_defunct(text=intervention_message(signed_fields)), private_key=owner.key
+    ).signature.hex()
+    memory = InterventionMemory(db, repo_id)
+    memory.record_intervention(
+        {
+            "signed_fields": signed_fields,
+            "intervention_signature": signature,
+            "incident_summary": "A vague request led to an unsafe release attempt.",
+        }
+    )
+    common = {
+        "session_id": "vague-session",
+        "cwd": str(tmp_path),
+        "model": "test",
+        "permission_mode": "default",
+    }
+    handle({**common, "hook_event_name": "UserPromptSubmit", "prompt": "Go on."})
+    blocked = handle(
+        {
+            **common,
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Bash",
+            "tool_input": {"command": "forge script Deploy.s.sol --broadcast"},
+        }
+    )
+    run = memory.get_run("vague-session")
+    reason = blocked["hookSpecificOutput"]["permissionDecisionReason"]
+    assert run["task_class"] == "release"
+    assert run["checkpoint_command"] == "./scripts/check-milestone.sh"
+    assert "remembered intervention requires" in reason

@@ -150,6 +150,7 @@ class InterventionMemory:
         agent_family: str,
         model: str,
         process_id: int | None = None,
+        force: bool = False,
     ) -> dict[str, Any]:
         try:
             existing = self.get_run(session_id)
@@ -157,7 +158,7 @@ class InterventionMemory:
             if "no Sibyl supervision run exists" not in str(exc):
                 raise
         else:
-            if existing["status"] == "open":
+            if existing["status"] == "open" and not force:
                 return existing
         lessons = self.matching_lessons(task_class, area, agent_family)
         checkpoint_commands = {lesson["checkpoint_command"].strip() for lesson in lessons}
