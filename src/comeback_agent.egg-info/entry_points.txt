@@ -1,0 +1,3 @@
+[console_scripts]
+comeback = comeback.cli:main
+comeback-hook = comeback.hook:main

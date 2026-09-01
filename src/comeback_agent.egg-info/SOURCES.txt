@@ -1,0 +1,16 @@
+pyproject.toml
+src/comeback/__init__.py
+src/comeback/cli.py
+src/comeback/hook.py
+src/comeback/identity.py
+src/comeback/memory.py
+src/comeback/policy.py
+src/comeback/signing.py
+src/comeback_agent.egg-info/PKG-INFO
+src/comeback_agent.egg-info/SOURCES.txt
+src/comeback_agent.egg-info/dependency_links.txt
+src/comeback_agent.egg-info/entry_points.txt
+src/comeback_agent.egg-info/requires.txt
+src/comeback_agent.egg-info/top_level.txt
+tests/test_memory.py
+tests/test_policy.py
