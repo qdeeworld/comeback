@@ -1,5 +1,7 @@
 # Comeback
 
+[![Comeback validation](https://github.com/qdeeworld/comeback/actions/workflows/validation.yml/badge.svg)](https://github.com/qdeeworld/comeback/actions/workflows/validation.yml)
+
 Comeback remembers where a coding agent needed human intervention, then changes how much autonomy the next agent receives for comparable work.
 
 This repository is a bounded Sibyl hackathon validation spike, not a finished product. Its single scenario is a release-class task:
@@ -40,6 +42,8 @@ python3 -m venv .venv
 
 The first gate runs signed intervention, five fresh-session blocks, malicious-prompt resistance, low-risk autonomy, evidence, unauthorized and authorized approval, outcome evolution, and memory ablation. The second starts a real ephemeral Codex process and proves the project hook blocks before the release marker is created.
 
+Every push also runs the deterministic fresh-session gate publicly in GitHub Actions and uploads its complete JSON replay artifact. The real Codex hook gate remains a local authenticated check because CI does not receive a Codex account credential.
+
 ## Partner stacks
 
 None in this spike. Base and Virtuals are deliberately excluded until adaptive supervision passes the product gate.
@@ -47,4 +51,3 @@ None in this spike. Base and Virtuals are deliberately excluded until adaptive s
 ## Prior Work
 
 See [PRIOR_WORK.md](PRIOR_WORK.md).
-
