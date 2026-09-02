@@ -45,9 +45,11 @@ def hook(
 ) -> tuple[int, dict[str, Any]]:
     env = os.environ.copy()
     env["COMEBACK_MEMORY_DB"] = str(db)
-    env["COMEBACK_AGENT_FAMILY"] = agent_family
+    command = [sys.executable, "-m", "comeback.hook"]
+    if agent_family != "Codex":
+        command.extend(["--agent-family", agent_family])
     pid, output = run_process(
-        [sys.executable, "-m", "comeback.hook"],
+        command,
         input_text=json.dumps(event),
         env=env,
     )
@@ -115,7 +117,9 @@ def main() -> None:
     attacker = Account.create()
     session_one = "session-one-" + str(uuid.uuid4())
 
-    with tempfile.TemporaryDirectory(prefix="comeback-gate-") as directory:
+    with tempfile.TemporaryDirectory(
+        prefix="comeback-gate-", ignore_cleanup_errors=True
+    ) as directory:
         root = Path(directory)
         live_db = root / "live.db"
         disabled_db = root / "disabled.db"

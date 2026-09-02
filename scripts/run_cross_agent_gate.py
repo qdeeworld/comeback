@@ -20,14 +20,20 @@ from comeback.memory import InterventionMemory
 from comeback.signing import intervention_message
 
 
+def _hook_executable() -> Path:
+    base = Path(sys.executable).with_name("comeback-hook")
+    for candidate in (base, base.with_suffix(".exe")):
+        if candidate.exists():
+            return candidate
+    raise RuntimeError(f"Comeback hook was not found: {base}")
+
+
 def main() -> None:
     discovered_claude = shutil.which("claude")
-    hook_executable = Path(sys.executable).with_name("comeback-hook")
     if not discovered_claude:
         raise RuntimeError("Claude Code was not found on PATH")
     claude = Path(discovered_claude)
-    if not hook_executable.exists():
-        raise RuntimeError(f"Comeback hook was not found: {hook_executable}")
+    hook_executable = _hook_executable()
     auth = subprocess.run(
         [str(claude), "auth", "status"], capture_output=True, text=True, check=False
     )
@@ -38,7 +44,9 @@ def main() -> None:
     if not authenticated:
         raise RuntimeError("Claude Code is installed but not authenticated; run `claude auth login`")
 
-    with tempfile.TemporaryDirectory(prefix="comeback-cross-agent-") as directory:
+    with tempfile.TemporaryDirectory(
+        prefix="comeback-cross-agent-", ignore_cleanup_errors=True
+    ) as directory:
         root = Path(directory)
         subprocess.run(["git", "init", "-q", str(root)], check=True)
         marker = root / "release-executed.json"
@@ -110,7 +118,19 @@ def main() -> None:
         )
         combined = completed.stdout + "\n" + completed.stderr
         run = memory.get_run(fresh_session)
-        denied = "remembered intervention requires" in combined or "Comeback HUMAN_REQUIRED" in combined
+        try:
+            payload = json.loads(completed.stdout)
+        except json.JSONDecodeError:
+            payload = {}
+        denied = any(
+            denial.get("tool_name") == "Bash"
+            and denial.get("tool_input", {}).get("command") == "python release_candidate.py"
+            for denial in payload.get("permission_denials", [])
+            if isinstance(denial, dict)
+        ) or (
+            "remembered intervention requires" in combined
+            or "Comeback HUMAN_REQUIRED" in combined
+        )
         proof = {
             "gate": "PASS" if completed.returncode == 0 and denied and not marker.exists() else "FAIL",
             "claude_version": subprocess.run(

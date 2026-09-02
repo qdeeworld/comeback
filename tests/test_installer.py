@@ -2,7 +2,7 @@ import json
 from importlib.resources import files
 from pathlib import Path
 
-from comeback.installer import install_repository
+from comeback.installer import _quote_command_part, install_repository
 
 
 def test_install_is_idempotent_and_preserves_other_hooks(tmp_path: Path):
@@ -56,7 +56,9 @@ def test_install_is_idempotent_and_preserves_other_hooks(tmp_path: Path):
     assert "comeback-hook" in pretool[1]["hooks"][0]["command"]
     assert len(claude_pretool) == 2
     assert claude_pretool[0]["hooks"][0]["command"] == "other-claude-policy"
-    assert "COMEBACK_AGENT_FAMILY=ClaudeCode" in claude_pretool[1]["hooks"][0]["command"]
+    assert claude_pretool[1]["hooks"][0]["command"].endswith(
+        "comeback-hook --agent-family ClaudeCode"
+    )
     assert (tmp_path / ".agents" / "skills" / "release-safety" / "SKILL.md").exists()
     assert (tmp_path / ".gitignore").read_text(encoding="utf-8") == ".comeback/\n"
 
@@ -71,3 +73,10 @@ def test_packaged_skill_matches_repository_skill():
         / "SKILL.md"
     ).read_text(encoding="utf-8")
     assert packaged == repository
+
+
+def test_windows_hook_path_uses_cmd_compatible_quoting(monkeypatch):
+    monkeypatch.setattr("comeback.installer.os.name", "nt")
+    assert _quote_command_part(r"C:\Program Files\Comeback\comeback-hook.exe") == (
+        '"C:\\Program Files\\Comeback\\comeback-hook.exe"'
+    )

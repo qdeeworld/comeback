@@ -30,7 +30,11 @@ def test_supervision_evolves_with_outcomes():
         "git push origin main",
         "command git push origin main",
         "/usr/bin/git push origin main",
+        "git -C /tmp/repo push origin main",
         "env RELEASE=1 git push origin main",
+        "bash -c 'git push origin main'",
+        "eval 'git push origin main'",
+        "echo ready;git push origin main",
         "pnpm run deploy",
         "npm publish",
         "./node_modules/.bin/wrangler deploy",
@@ -45,9 +49,18 @@ def test_recognized_release_command_spellings_are_protected(command):
     )
 
 
-def test_release_words_inside_echo_are_not_treated_as_actions():
+@pytest.mark.parametrize(
+    "command",
+    [
+        'echo "git push origin main"',
+        "cat release_candidate.py",
+        "type release_candidate.py",
+        "sed -n '1,20p' release_candidate.py",
+    ],
+)
+def test_release_words_in_read_only_arguments_are_not_treated_as_actions(command):
     assert not is_release_action(
-        {"tool_name": "Bash", "tool_input": {"command": 'echo "git push origin main"'}}
+        {"tool_name": "Bash", "tool_input": {"command": command}}
     )
 
 

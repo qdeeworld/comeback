@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -21,13 +22,21 @@ from comeback.policy import checkpoint_invocation
 from comeback.signing import approval_message, intervention_message
 
 
+def _hook_executable() -> Path:
+    base = Path(sys.executable).with_name("comeback-hook")
+    for candidate in (base, base.with_suffix(".exe")):
+        if candidate.exists():
+            return candidate
+    raise RuntimeError(f"Comeback hook was not found: {base}")
+
+
 def main() -> None:
-    with tempfile.TemporaryDirectory(prefix="comeback-real-codex-") as directory:
+    with tempfile.TemporaryDirectory(
+        prefix="comeback-real-codex-", ignore_cleanup_errors=True
+    ) as directory:
         root = Path(directory)
         subprocess.run(["git", "init", "-q", str(root)], check=True)
-        hook_executable = Path(sys.executable).with_name("comeback-hook")
-        if not hook_executable.exists():
-            raise RuntimeError(f"Comeback hook was not found: {hook_executable}")
+        hook_executable = _hook_executable()
         install_repository(root, executable=hook_executable)
         marker = root / "release-executed.json"
         python_command = shlex.quote(sys.executable)
@@ -75,8 +84,11 @@ def main() -> None:
         )
         env = os.environ.copy()
         env["COMEBACK_MEMORY_DB"] = str(db)
+        discovered_codex = shutil.which("codex")
+        if not discovered_codex:
+            raise RuntimeError("Codex CLI was not found on PATH")
         command = [
-            "codex",
+            discovered_codex,
             "exec",
             "--dangerously-bypass-hook-trust",
             "--ephemeral",
@@ -182,7 +194,10 @@ def main() -> None:
                 {
                     "gate": "PASS",
                     "codex_version": subprocess.run(
-                        ["codex", "--version"], capture_output=True, text=True, check=True
+                        [discovered_codex, "--version"],
+                        capture_output=True,
+                        text=True,
+                        check=True,
                     ).stdout.strip(),
                     "source_session": source_session,
                     "fresh_codex_session": release_runs[0].get("session_id"),

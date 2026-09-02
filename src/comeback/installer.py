@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import os
 import shlex
 import shutil
+import subprocess
 from importlib.resources import files
 from pathlib import Path
 from typing import Any
@@ -17,8 +19,14 @@ def _hook_handler(command: str, status: str | None = None) -> dict[str, Any]:
     return handler
 
 
+def _quote_command_part(value: str) -> str:
+    if os.name == "nt":
+        return subprocess.list2cmdline([value])
+    return shlex.quote(value)
+
+
 def hook_groups(executable: Path) -> dict[str, list[dict[str, Any]]]:
-    command = shlex.quote(str(executable.resolve()))
+    command = _quote_command_part(str(executable.resolve()))
     return {
         "UserPromptSubmit": [
             {
@@ -47,7 +55,7 @@ def hook_groups(executable: Path) -> dict[str, list[dict[str, Any]]]:
 
 
 def claude_hook_groups(executable: Path) -> dict[str, list[dict[str, Any]]]:
-    command = "COMEBACK_AGENT_FAMILY=ClaudeCode " + shlex.quote(str(executable.resolve()))
+    command = _quote_command_part(str(executable.resolve())) + " --agent-family ClaudeCode"
     handler = {"type": "command", "command": command, "timeout": 30}
     return {
         "UserPromptSubmit": [{"hooks": [handler]}],

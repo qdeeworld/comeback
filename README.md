@@ -109,9 +109,12 @@ python3 -m venv .venv
 .venv/bin/python scripts/run_validation_gate.py
 .venv/bin/python scripts/run_codex_hook_gate.py
 .venv/bin/python scripts/run_cross_agent_gate.py
+.venv/bin/python scripts/run_claude_unlock_gate.py
 ```
 
-The first gate runs signed intervention, five fresh-session blocks, Codex-to-Claude recall, malicious-prompt resistance, low-risk autonomy, evidence, unauthorized and authorized approval, outcome evolution, and Claude-side memory ablation. The second starts two real ephemeral Codex processes: one proves the hook blocks before the release side effect, and the next proves the complete checkpoint → authorized release → successful outcome loop using exit-bound markers. The third performs the boundary test in a real Claude Code process and requires an authenticated local Claude Code installation.
+The first gate runs signed intervention, five fresh-session blocks, Codex-to-Claude recall, malicious-prompt resistance, low-risk autonomy, evidence, unauthorized and authorized approval, outcome evolution, and Claude-side memory ablation. The second starts two real ephemeral Codex processes: one proves the hook blocks before the release side effect, and the next proves the complete checkpoint → authorized release → successful outcome loop using exit-bound markers. The third proves a Codex intervention blocks a real fresh Claude Code process. The fourth proves Claude's complete checkpoint → release → outcome loop. The Claude gates require an authenticated local Claude Code installation.
+
+The gate scripts resolve Windows `.exe` console scripts, use structured Claude permission-denial evidence, and tolerate Sibyl's open SQLite handle during Windows temporary-directory cleanup. Installed Claude hooks pass the agent family as an explicit argument instead of relying on POSIX-only environment-variable syntax.
 
 Every push also runs the deterministic fresh-session gate publicly in GitHub Actions and uploads its complete JSON replay artifact. The real Codex and Claude Code hook gates remain local authenticated checks because CI does not receive either account credential.
 

@@ -23,7 +23,10 @@ def _database(root: Path) -> Path:
     return Path(configured).expanduser().resolve() if configured else root / ".comeback" / "memory.db"
 
 
-def _agent_family(_: dict[str, Any]) -> str:
+def _agent_family(event: dict[str, Any]) -> str:
+    override = event.get("_comeback_agent_family")
+    if isinstance(override, str) and override:
+        return override
     return os.environ.get("COMEBACK_AGENT_FAMILY", "Codex")
 
 
@@ -181,9 +184,16 @@ def handle(event: dict[str, Any]) -> dict[str, Any] | None:
 
 def main() -> None:
     try:
+        agent_family = None
+        if sys.argv[1:]:
+            if len(sys.argv) != 3 or sys.argv[1] != "--agent-family" or not sys.argv[2]:
+                raise MemoryIntegrityError("usage: comeback-hook [--agent-family NAME]")
+            agent_family = sys.argv[2]
         event = json.load(sys.stdin)
         if not isinstance(event, dict):
             raise MemoryIntegrityError("hook input must be an object")
+        if agent_family:
+            event["_comeback_agent_family"] = agent_family
         output = handle(event)
         if output is not None:
             print(json.dumps(output, sort_keys=True))
