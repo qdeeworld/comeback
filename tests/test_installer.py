@@ -57,9 +57,11 @@ def test_install_is_idempotent_and_preserves_other_hooks(tmp_path: Path):
     assert "comeback-hook" in pretool[1]["hooks"][0]["command"]
     assert len(claude_pretool) == 2
     assert claude_pretool[0]["hooks"][0]["command"] == "other-claude-policy"
-    assert claude_pretool[1]["hooks"][0]["command"].endswith(
-        "comeback-hook --agent-family ClaudeCode"
-    )
+    assert shlex.split(claude_pretool[1]["hooks"][0]["command"], posix=True) == [
+        str(executable.resolve()),
+        "--agent-family",
+        "ClaudeCode",
+    ]
     assert (tmp_path / ".agents" / "skills" / "release-safety" / "SKILL.md").exists()
     assert (tmp_path / ".gitignore").read_text(encoding="utf-8") == ".comeback/\n"
 
