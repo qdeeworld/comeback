@@ -93,10 +93,22 @@ def _segment_is_release(words: list[str]) -> bool:
             index += 1
         return _segment_is_release(words[index:])
     if executable in _SHELLS:
-        try:
-            command_index = normalized.index("-c", index + 1) + 1
-        except (ValueError, IndexError):
+        command_option = next(
+            (
+                option_index
+                for option_index in range(index + 1, len(normalized))
+                if normalized[option_index] == "-c"
+                or (
+                    normalized[option_index].startswith("-")
+                    and not normalized[option_index].startswith("--")
+                    and "c" in normalized[option_index][1:]
+                )
+            ),
+            None,
+        )
+        if command_option is None or command_option + 1 >= len(words):
             return False
+        command_index = command_option + 1
         try:
             return _contains_release_action(_shell_words(words[command_index]))
         except ValueError:

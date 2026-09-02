@@ -36,6 +36,8 @@ def test_supervision_evolves_with_outcomes():
         "git -C /tmp/repo push origin main",
         "env RELEASE=1 git push origin main",
         "bash -c 'git push origin main'",
+        "bash -lc 'git push origin main'",
+        "env RELEASE=1 /bin/bash --noprofile -lc 'git push origin main'",
         "eval 'git push origin main'",
         "echo ready;git push origin main",
         "pnpm run deploy",
