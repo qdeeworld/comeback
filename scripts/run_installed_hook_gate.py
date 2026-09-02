@@ -39,8 +39,12 @@ def _run_hook(
     }
     environment = os.environ.copy()
     environment["COMEBACK_MEMORY_DB"] = str(database)
+    # Put the installed command in a script so Windows CreateProcess argument
+    # parsing cannot consume its shell quotes before Git Bash reads them.
+    command_script = root / f".comeback-hook-{session_id}.sh"
+    command_script.write_text(command + "\n", encoding="utf-8")
     completed = subprocess.run(
-        [bash, "-lc", command],
+        [bash, command_script.name],
         cwd=root,
         env=environment,
         input=json.dumps(event),
