@@ -49,14 +49,14 @@ To turn a real human correction into enforceable memory:
 
 ```bash
 comeback prepare-intervention \
-  --latest \
+  --session-id <exact-session-id-from-comeback-status> \
   --authorized-closer <ethereum-address> \
   --summary "Agent attempted release before the required check" \
   --checkpoint-command "pnpm test && pnpm run release:check" \
   > comeback-intervention.json
 ```
 
-`comeback status` shows recent Sibyl-backed runs and their session IDs. `--latest` binds the intervention to the most recently updated run; use `--session-id` when selecting an older correction.
+`comeback status` shows recent Sibyl-backed runs and their session IDs. Comeback requires the exact session ID so a concurrent or stale run cannot receive the intervention accidentally.
 
 New interventions default to `--agent-scope all_supported`, so a correction created after a Codex incident can supervise Claude Code and vice versa. Use `--agent-scope same_agent` when the lesson should remain specific to the source harness. The selected scope is part of the signed intervention and cannot be widened later without a new signature.
 
@@ -74,7 +74,9 @@ The wallet never authorizes a transaction. The first signed intervention is a lo
 In the fresh supervised session, run the exact checkpoint invocation Comeback recalls. New interventions bind a random signed success marker to that invocation, so Codex's stdout-only hook response records evidence only when the shell reaches the marker after a zero exit. For `HUMAN_REQUIRED`, prepare and sign the approval from a separate terminal:
 
 ```bash
-comeback prepare-approval --latest > comeback-approval.json
+comeback prepare-approval \
+  --session-id <exact-supervised-session-id> \
+  > comeback-approval.json
 approval_signature=$(cast wallet sign --interactive "$(jq -r .message_to_sign comeback-approval.json)")
 comeback approve \
   --session-id "$(jq -r .session_id comeback-approval.json)" \
