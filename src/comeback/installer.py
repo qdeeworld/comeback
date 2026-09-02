@@ -46,6 +46,21 @@ def hook_groups(executable: Path) -> dict[str, list[dict[str, Any]]]:
     }
 
 
+def claude_hook_groups(executable: Path) -> dict[str, list[dict[str, Any]]]:
+    command = "COMEBACK_AGENT_FAMILY=ClaudeCode " + shlex.quote(str(executable.resolve()))
+    handler = {"type": "command", "command": command, "timeout": 30}
+    return {
+        "UserPromptSubmit": [{"hooks": [handler]}],
+        "PreToolUse": [
+            {"matcher": "Bash|Edit|Write", "hooks": [handler]},
+        ],
+        "PostToolUse": [
+            {"matcher": "Bash|Edit|Write", "hooks": [handler]},
+        ],
+        "Stop": [{"hooks": [handler]}],
+    }
+
+
 def _is_comeback_group(group: Any) -> bool:
     if not isinstance(group, dict):
         return False
@@ -54,6 +69,33 @@ def _is_comeback_group(group: Any) -> bool:
         isinstance(handler, dict) and "comeback-hook" in str(handler.get("command", ""))
         for handler in handlers
     )
+
+
+def _load_hook_config(path: Path, *, description: str | None = None) -> dict[str, Any]:
+    if path.exists():
+        try:
+            config = json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(f"existing hooks file is invalid JSON: {path}") from exc
+        if not isinstance(config, dict) or not isinstance(config.get("hooks", {}), dict):
+            raise RuntimeError(f"existing hooks file has an unsupported shape: {path}")
+        return config
+    config: dict[str, Any] = {"hooks": {}}
+    if description:
+        config["description"] = description
+    return config
+
+
+def _merge_hook_groups(
+    config: dict[str, Any], groups_by_event: dict[str, list[dict[str, Any]]]
+) -> dict[str, Any]:
+    configured = config.setdefault("hooks", {})
+    for event_name, groups in groups_by_event.items():
+        existing = configured.get(event_name, [])
+        if not isinstance(existing, list):
+            raise RuntimeError(f"existing {event_name} hooks must be a list")
+        configured[event_name] = [group for group in existing if not _is_comeback_group(group)] + groups
+    return config
 
 
 def _write_text(path: Path, text: str) -> None:
@@ -74,23 +116,18 @@ def install_repository(repo: str | Path, *, executable: Path | None = None) -> d
         raise RuntimeError(f"Comeback hook executable was not found: {executable}")
 
     hooks_path = root / ".codex" / "hooks.json"
-    if hooks_path.exists():
-        try:
-            config = json.loads(hooks_path.read_text(encoding="utf-8"))
-        except json.JSONDecodeError as exc:
-            raise RuntimeError(f"existing hooks file is invalid JSON: {hooks_path}") from exc
-        if not isinstance(config, dict) or not isinstance(config.get("hooks", {}), dict):
-            raise RuntimeError(f"existing hooks file has an unsupported shape: {hooks_path}")
-    else:
-        config = {"description": "Repository lifecycle hooks.", "hooks": {}}
-
-    configured = config.setdefault("hooks", {})
-    for event_name, groups in hook_groups(executable).items():
-        existing = configured.get(event_name, [])
-        if not isinstance(existing, list):
-            raise RuntimeError(f"existing {event_name} hooks must be a list")
-        configured[event_name] = [group for group in existing if not _is_comeback_group(group)] + groups
+    config = _merge_hook_groups(
+        _load_hook_config(hooks_path, description="Repository lifecycle hooks."),
+        hook_groups(executable),
+    )
     _write_text(hooks_path, json.dumps(config, indent=2, sort_keys=True) + "\n")
+
+    claude_settings_path = root / ".claude" / "settings.json"
+    claude_config = _merge_hook_groups(
+        _load_hook_config(claude_settings_path),
+        claude_hook_groups(executable),
+    )
+    _write_text(claude_settings_path, json.dumps(claude_config, indent=2, sort_keys=True) + "\n")
 
     skill_path = root / ".agents" / "skills" / "release-safety" / "SKILL.md"
     skill_text = files("comeback.assets").joinpath("release-safety.SKILL.md").read_text(encoding="utf-8")
@@ -109,8 +146,9 @@ def install_repository(repo: str | Path, *, executable: Path | None = None) -> d
     return {
         "repo": str(root),
         "hooks": str(hooks_path),
+        "claude_settings": str(claude_settings_path),
         "skill": str(skill_path),
         "memory": str(root / ".comeback" / "memory.db"),
         "hook_executable": str(executable.resolve()),
-        "next": "Open Codex in this repository, run /hooks, and trust the Comeback hook definition.",
+        "next": "Open Codex or Claude Code in this repository and approve the reviewed Comeback project hooks.",
     }

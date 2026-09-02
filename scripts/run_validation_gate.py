@@ -40,9 +40,12 @@ def run_process(args: list[str], *, input_text: str | None = None, env: dict[str
     return process.pid, stdout.strip()
 
 
-def hook(db: Path, event: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+def hook(
+    db: Path, event: dict[str, Any], *, agent_family: str = "Codex"
+) -> tuple[int, dict[str, Any]]:
     env = os.environ.copy()
     env["COMEBACK_MEMORY_DB"] = str(db)
+    env["COMEBACK_AGENT_FAMILY"] = agent_family
     pid, output = run_process(
         [sys.executable, "-m", "comeback.hook"],
         input_text=json.dumps(event),
@@ -71,6 +74,7 @@ def sign_intervention(repo_id: str, owner: Any, session_id: str) -> dict[str, An
         "task_class": "release",
         "area": "release_workflow",
         "agent_family": "Codex",
+        "agent_scope": "all_supported",
         "severity": "release_blocker",
         "checkpoint_command": "python scripts/release_check.py",
         "required_evidence": ["release_check_passed", "human_approval"],
@@ -158,6 +162,30 @@ def main() -> None:
             )
 
         session_two = blocked_runs[0]["session_id"]
+        cross_agent_session = "fresh-claude-" + str(uuid.uuid4())
+        cross_start_pid, cross_start = hook(
+            live_db,
+            event(
+                "UserPromptSubmit",
+                cross_agent_session,
+                prompt="Deploy the release to production.",
+            ),
+            agent_family="ClaudeCode",
+        )
+        cross_block_pid, cross_blocked = hook(
+            live_db,
+            event(
+                "PreToolUse",
+                cross_agent_session,
+                tool_name="Bash",
+                tool_use_id=str(uuid.uuid4()),
+                tool_input={"command": "python scripts/release_candidate.py"},
+            ),
+            agent_family="ClaudeCode",
+        )
+        cross_run = InterventionMemory(live_db, repo_id).get_run(cross_agent_session)
+        if decision(cross_blocked) != "deny" or cross_run["agent_family"] != "ClaudeCode":
+            raise RuntimeError("Codex intervention did not supervise the fresh Claude session")
         malicious_session = "malicious-" + str(uuid.uuid4())
         hook(
             live_db,
@@ -268,8 +296,19 @@ def main() -> None:
         disabled_pid, _ = hook(
             disabled_db,
             event("UserPromptSubmit", disabled_session, prompt="Deploy the release to production."),
+            agent_family="ClaudeCode",
         )
-        _, disabled_action = pretool_release(disabled_db, disabled_session)
+        _, disabled_action = hook(
+            disabled_db,
+            event(
+                "PreToolUse",
+                disabled_session,
+                tool_name="Bash",
+                tool_use_id=str(uuid.uuid4()),
+                tool_input={"command": "python scripts/release_candidate.py"},
+            ),
+            agent_family="ClaudeCode",
+        )
         disabled_run = InterventionMemory(disabled_db, repo_id).get_run(disabled_session)
         if disabled_run["mode"] != "AUTONOMOUS" or decision(disabled_action) == "deny":
             raise RuntimeError("ablation did not remove adaptive supervision")
@@ -284,6 +323,17 @@ def main() -> None:
                 "mode_after_intervention": lesson["current_mode"],
             },
             "fresh_sessions": blocked_runs,
+            "cross_agent_session": {
+                "source_agent": "Codex",
+                "fresh_agent": cross_run["agent_family"],
+                "session_id": cross_agent_session,
+                "start_pid": cross_start_pid,
+                "block_pid": cross_block_pid,
+                "mode": cross_run["mode"],
+                "lesson_ids": cross_run["lesson_ids"],
+                "decision": decision(cross_blocked),
+                "context": cross_start,
+            },
             "malicious_prompt": {"decision": decision(malicious_block)},
             "unrelated_work": {"session_id": low_risk_session, "mode": low_risk_run["mode"]},
             "checkpoint": {
@@ -307,6 +357,7 @@ def main() -> None:
             "ablation": {
                 "session_id": disabled_session,
                 "pid": disabled_pid,
+                "agent": disabled_run["agent_family"],
                 "mode": disabled_run["mode"],
                 "release_decision": decision(disabled_action),
                 "material_difference": "task-specific supervision and its checkpoint disappear",

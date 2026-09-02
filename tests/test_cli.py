@@ -59,6 +59,7 @@ def test_prepare_sign_and_record_intervention(tmp_path: Path):
         model="test",
     )
     assert lesson["current_mode"] == "HUMAN_REQUIRED"
+    assert lesson["agent_scope"] == "all_supported"
     assert fresh["mode"] == "HUMAN_REQUIRED"
 
 

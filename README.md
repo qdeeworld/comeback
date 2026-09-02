@@ -9,8 +9,8 @@ This repository is a bounded Sibyl hackathon validation spike, not a finished pr
 1. A developer signs an intervention after an agent attempted release before the required check.
 2. Sibyl stores the intervention, provenance, task scope, outcome counts and current supervision mode.
 3. The first process ends.
-4. A genuinely fresh Codex session receives only a related release request.
-5. A synchronous Codex `PreToolUse` hook recalls Sibyl and denies the release action.
+4. A genuinely fresh Codex or Claude Code session receives only a related release request.
+5. A synchronous `PreToolUse` hook recalls Sibyl and denies the release action—even when the intervention came from the other agent.
 6. A successful check plus the authorized closer's signed approval unlocks the action.
 7. The release outcome updates the lesson; the next fresh session moves from `HUMAN_REQUIRED` to `CHECKPOINTED`.
 
@@ -24,7 +24,7 @@ cd your-repository
 comeback init
 ```
 
-`comeback init` merges Comeback into an existing `.codex/hooks.json`, installs the narrow release-safety Skill, and ignores the repository-local Sibyl database. It does not overwrite unrelated hooks or Skills. Open Codex in that repository, run `/hooks`, and trust the reviewed Comeback definition as required by Codex.
+`comeback init` merges Comeback into existing `.codex/hooks.json` and `.claude/settings.json` files, installs the narrow release-safety Skill, and ignores the repository-local Sibyl database. It does not overwrite unrelated hooks or Skills. Review and approve the project hooks when Codex or Claude Code asks.
 
 To turn a real human correction into enforceable memory:
 
@@ -38,6 +38,8 @@ comeback prepare-intervention \
 ```
 
 `comeback status` shows recent Sibyl-backed runs and their session IDs. `--latest` binds the intervention to the most recently updated run; use `--session-id` when selecting an older correction.
+
+New interventions default to `--agent-scope all_supported`, so a correction created after a Codex incident can supervise Claude Code and vice versa. Use `--agent-scope same_agent` when the lesson should remain specific to the source harness. The selected scope is part of the signed intervention and cannot be widened later without a new signature.
 
 Sign the exact `message_to_sign` with the authorized address using an ERC-191-compatible wallet, then record it:
 
@@ -85,11 +87,12 @@ python3 -m venv .venv
 .venv/bin/pytest -q
 .venv/bin/python scripts/run_validation_gate.py
 .venv/bin/python scripts/run_codex_hook_gate.py
+.venv/bin/python scripts/run_cross_agent_gate.py
 ```
 
-The first gate runs signed intervention, five fresh-session blocks, malicious-prompt resistance, low-risk autonomy, evidence, unauthorized and authorized approval, outcome evolution, and memory ablation. The second starts a real ephemeral Codex process and proves the project hook blocks before the release marker is created.
+The first gate runs signed intervention, five fresh-session blocks, Codex-to-Claude recall, malicious-prompt resistance, low-risk autonomy, evidence, unauthorized and authorized approval, outcome evolution, and Claude-side memory ablation. The second starts a real ephemeral Codex process and proves the project hook blocks before the release marker is created. The third performs the same boundary test in a real Claude Code process and requires an authenticated local Claude Code installation.
 
-Every push also runs the deterministic fresh-session gate publicly in GitHub Actions and uploads its complete JSON replay artifact. The real Codex hook gate remains a local authenticated check because CI does not receive a Codex account credential.
+Every push also runs the deterministic fresh-session gate publicly in GitHub Actions and uploads its complete JSON replay artifact. The real Codex and Claude Code hook gates remain local authenticated checks because CI does not receive either account credential.
 
 ## Partner stacks
 

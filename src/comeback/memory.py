@@ -40,17 +40,23 @@ def validate_lesson(body: Any) -> dict[str, Any]:
             raise MemoryIntegrityError(f"lesson {field} is invalid")
     if body["current_mode"] not in MODES:
         raise MemoryIntegrityError("lesson mode is invalid")
+    if body.get("agent_scope", "same_agent") not in ("same_agent", "all_supported"):
+        raise MemoryIntegrityError("lesson agent_scope is invalid")
     if body["status"] != "active":
         raise MemoryIntegrityError("lesson is not active")
     for field in ("failure_count", "success_count", "revision"):
         if not isinstance(body.get(field), int) or body[field] < 0:
             raise MemoryIntegrityError(f"lesson {field} is invalid")
     body = deepcopy(body)
+    body["agent_scope"] = body.get("agent_scope", "same_agent")
     body["required_evidence"] = _strings(body.get("required_evidence"), "required_evidence")
     signature = body.get("intervention_signature")
     signed_fields = body.get("signed_fields")
     if not isinstance(signature, str) or not isinstance(signed_fields, dict):
         raise MemoryIntegrityError("lesson lacks signed intervention provenance")
+    signed_scope = signed_fields.get("agent_scope", "same_agent")
+    if body["agent_scope"] != signed_scope:
+        raise MemoryIntegrityError("lesson agent_scope differs from its signed scope")
     signer = recover_address(intervention_message(signed_fields), signature)
     if signer != body["authorized_closer"].lower():
         raise MemoryIntegrityError("lesson intervention signature is invalid")
@@ -132,11 +138,16 @@ class InterventionMemory:
         matches = []
         for entity in self.client.list_entities(self.LESSON_CATEGORY, status="active", limit=100):
             lesson = validate_lesson(entity.get("body"))
+            agent_scope = lesson.get("agent_scope", "same_agent")
+            applies_to_agent = (
+                agent_scope == "all_supported"
+                or lesson["agent_family"].lower() == agent_family.lower()
+            )
             if (
                 lesson["repo_id"] == self.repo_id
                 and lesson["task_class"] == task_class
                 and lesson["area"] == area
-                and lesson["agent_family"].lower() == agent_family.lower()
+                and applies_to_agent
             ):
                 matches.append(lesson)
         return matches

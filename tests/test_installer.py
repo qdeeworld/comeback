@@ -25,16 +25,38 @@ def test_install_is_idempotent_and_preserves_other_hooks(tmp_path: Path):
         ),
         encoding="utf-8",
     )
+    claude_path = tmp_path / ".claude" / "settings.json"
+    claude_path.parent.mkdir(parents=True)
+    claude_path.write_text(
+        json.dumps(
+            {
+                "hooks": {
+                    "PreToolUse": [
+                        {
+                            "matcher": "Bash",
+                            "hooks": [{"type": "command", "command": "other-claude-policy"}],
+                        }
+                    ]
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
 
     first = install_repository(tmp_path, executable=executable)
     second = install_repository(tmp_path, executable=executable)
     installed = json.loads(hooks_path.read_text(encoding="utf-8"))
     pretool = installed["hooks"]["PreToolUse"]
+    installed_claude = json.loads(claude_path.read_text(encoding="utf-8"))
+    claude_pretool = installed_claude["hooks"]["PreToolUse"]
 
     assert first == second
     assert len(pretool) == 2
     assert pretool[0]["hooks"][0]["command"] == "other-policy"
     assert "comeback-hook" in pretool[1]["hooks"][0]["command"]
+    assert len(claude_pretool) == 2
+    assert claude_pretool[0]["hooks"][0]["command"] == "other-claude-policy"
+    assert "COMEBACK_AGENT_FAMILY=ClaudeCode" in claude_pretool[1]["hooks"][0]["command"]
     assert (tmp_path / ".agents" / "skills" / "release-safety" / "SKILL.md").exists()
     assert (tmp_path / ".gitignore").read_text(encoding="utf-8") == ".comeback/\n"
 
@@ -49,4 +71,3 @@ def test_packaged_skill_matches_repository_skill():
         / "SKILL.md"
     ).read_text(encoding="utf-8")
     assert packaged == repository
-

@@ -120,3 +120,55 @@ def test_release_action_promotes_vague_prompt_and_recalls_lesson(tmp_path: Path,
     assert run["task_class"] == "release"
     assert run["checkpoint_command"] == "./scripts/check-milestone.sh"
     assert "remembered intervention requires" in reason
+
+
+def test_claude_hook_recalls_cross_agent_codex_intervention(tmp_path: Path, monkeypatch):
+    db = tmp_path / "memory.db"
+    monkeypatch.setenv("COMEBACK_MEMORY_DB", str(db))
+    monkeypatch.setenv("COMEBACK_AGENT_FAMILY", "ClaudeCode")
+    owner = Account.create()
+    _, repo_id = repository_identity(tmp_path)
+    signed_fields = {
+        "lesson_id": "release-release_workflow-codex",
+        "repo_id": repo_id,
+        "task_class": "release",
+        "area": "release_workflow",
+        "agent_family": "Codex",
+        "agent_scope": "all_supported",
+        "severity": "release_blocker",
+        "checkpoint_command": "pnpm run release:check",
+        "required_evidence": ["release_check_passed", "human_approval"],
+        "authorized_closer": owner.address.lower(),
+        "source_session_id": "codex-correction",
+        "incident_at": datetime.now(timezone.utc).isoformat(),
+    }
+    signature = Account.sign_message(
+        encode_defunct(text=intervention_message(signed_fields)), private_key=owner.key
+    ).signature.hex()
+    InterventionMemory(db, repo_id).record_intervention(
+        {
+            "signed_fields": signed_fields,
+            "intervention_signature": signature,
+            "incident_summary": "Codex skipped the release check.",
+        }
+    )
+    common = {
+        "session_id": "fresh-claude",
+        "cwd": str(tmp_path),
+        "model": "claude",
+    }
+
+    handle({**common, "hook_event_name": "UserPromptSubmit", "prompt": "Deploy this release."})
+    blocked = handle(
+        {
+            **common,
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Bash",
+            "tool_input": {"command": "git push origin main"},
+        }
+    )
+
+    run = InterventionMemory(db, repo_id).get_run("fresh-claude")
+    assert run["agent_family"] == "ClaudeCode"
+    assert run["lesson_ids"] == ["release-release_workflow-codex"]
+    assert blocked["hookSpecificOutput"]["permissionDecision"] == "deny"

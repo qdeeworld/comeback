@@ -52,6 +52,12 @@ def _parser() -> argparse.ArgumentParser:
     prepare.add_argument("--task-class", default="release")
     prepare.add_argument("--area", default="release_workflow")
     prepare.add_argument("--agent-family", default="Codex")
+    prepare.add_argument(
+        "--agent-scope",
+        choices=("same_agent", "all_supported"),
+        default="all_supported",
+        help="Apply the intervention only to its source agent or to every supported coding agent",
+    )
     prepare.add_argument("--severity", default="release_blocker")
     prepare.add_argument(
         "--checkpoint-command",
@@ -122,6 +128,7 @@ def main() -> None:
                 "task_class": task_class,
                 "area": area,
                 "agent_family": agent_family,
+                "agent_scope": args.agent_scope,
                 "severity": args.severity,
                 "checkpoint_command": args.checkpoint_command.strip(),
                 "required_evidence": ["release_check_passed", "human_approval"],

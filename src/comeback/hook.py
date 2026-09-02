@@ -17,7 +17,7 @@ def _database(root: Path) -> Path:
 
 
 def _agent_family(_: dict[str, Any]) -> str:
-    return "Codex"
+    return os.environ.get("COMEBACK_AGENT_FAMILY", "Codex")
 
 
 def _context(run: dict[str, Any]) -> str:
