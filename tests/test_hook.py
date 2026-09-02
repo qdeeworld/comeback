@@ -7,6 +7,7 @@ from eth_account.messages import encode_defunct
 from comeback.hook import handle
 from comeback.identity import repository_identity
 from comeback.memory import InterventionMemory
+from comeback.policy import checkpoint_invocation
 from comeback.signing import intervention_message
 
 
@@ -23,6 +24,7 @@ def test_only_signed_repository_checkpoint_satisfies_gate(tmp_path: Path, monkey
         "agent_family": "Codex",
         "severity": "release_blocker",
         "checkpoint_command": "pnpm run release:check",
+        "checkpoint_success_marker": "COMEBACK_CHECK_OK_TEST",
         "required_evidence": ["release_check_passed", "human_approval"],
         "authorized_closer": owner.address.lower(),
         "source_session_id": "corrected-session",
@@ -62,8 +64,12 @@ def test_only_signed_repository_checkpoint_satisfies_gate(tmp_path: Path, monkey
             **common,
             "hook_event_name": "PostToolUse",
             "tool_name": "Bash",
-            "tool_input": {"command": "pnpm run release:check"},
-            "tool_response": {"exit_code": 0},
+            "tool_input": {
+                "command": checkpoint_invocation(
+                    "pnpm run release:check", "COMEBACK_CHECK_OK_TEST"
+                )
+            },
+            "tool_response": "RELEASE CHECK PASSED\nCOMEBACK_CHECK_OK_TEST\n",
         }
     )
     assert memory.get_run("fresh-session")["satisfied_evidence"] == [

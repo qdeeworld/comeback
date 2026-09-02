@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import secrets
 from pathlib import Path
 
 from .identity import repository_identity
@@ -131,6 +132,8 @@ def main() -> None:
                 "agent_scope": args.agent_scope,
                 "severity": args.severity,
                 "checkpoint_command": args.checkpoint_command.strip(),
+                "checkpoint_success_marker": "COMEBACK_CHECK_OK_" + secrets.token_hex(16),
+                "release_success_marker": "COMEBACK_RELEASE_OK_" + secrets.token_hex(16),
                 "required_evidence": ["release_check_passed", "human_approval"],
                 "authorized_closer": closer,
                 "source_session_id": source_session_id,

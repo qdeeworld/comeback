@@ -8,7 +8,14 @@ from typing import Any
 
 from .identity import repository_identity
 from .memory import InterventionMemory, MemoryIntegrityError
-from .policy import classify_task, command_from_event, is_release_action, tool_succeeded
+from .policy import (
+    checkpoint_invocation,
+    classify_task,
+    command_from_event,
+    is_success_wrapped,
+    is_release_action,
+    tool_succeeded,
+)
 
 
 def _database(root: Path) -> Path:
@@ -23,7 +30,9 @@ def _agent_family(_: dict[str, Any]) -> str:
 def _context(run: dict[str, Any]) -> str:
     lessons = len(run["lesson_ids"])
     requirements = ", ".join(run["required_evidence"]) or "none"
-    checkpoint = run.get("checkpoint_command") or "none"
+    checkpoint = checkpoint_invocation(
+        run.get("checkpoint_command", ""), run.get("checkpoint_success_marker", "")
+    ) or "none"
     return (
         f"Comeback supervision: {run['mode']}. "
         f"Recalled intervention lessons: {lessons}. Required evidence: {requirements}. "
@@ -92,6 +101,14 @@ def handle(event: dict[str, Any]) -> dict[str, Any] | None:
                 + ", ".join(missing)
                 + " before this release action."
             )
+        release_marker = run.get("release_success_marker", "")
+        release_command = command_from_event(event).strip()
+        if release_marker and not is_success_wrapped(release_command, release_marker):
+            protected_command = checkpoint_invocation(release_command, release_marker)
+            return _deny(
+                "Comeback requires an exit-bound release receipt. Run exactly: "
+                + protected_command
+            )
         return {
             "hookSpecificOutput": {
                 "hookEventName": "PreToolUse",
@@ -105,12 +122,14 @@ def handle(event: dict[str, Any]) -> dict[str, Any] | None:
         except MemoryIntegrityError:
             run = None
         checkpoint_command = run.get("checkpoint_command", "") if run else ""
-        is_checkpoint = bool(checkpoint_command) and command_from_event(event).strip() == checkpoint_command.strip()
+        checkpoint_marker = run.get("checkpoint_success_marker", "") if run else ""
+        expected_invocation = checkpoint_invocation(checkpoint_command, checkpoint_marker)
+        is_checkpoint = bool(checkpoint_command) and command_from_event(event).strip() == expected_invocation
     else:
         is_checkpoint = False
 
     if event_name == "PostToolUse" and is_checkpoint:
-        if tool_succeeded(event):
+        if tool_succeeded(event, expected_marker=checkpoint_marker):
             run = memory.add_evidence(session_id, "release_check_passed")
             return {
                 "hookSpecificOutput": {
@@ -125,7 +144,15 @@ def handle(event: dict[str, Any]) -> dict[str, Any] | None:
         }
 
     if event_name == "PostToolUse" and is_release_action(event):
-        run = memory.record_release_outcome(session_id, success=tool_succeeded(event))
+        try:
+            run = memory.get_run(session_id)
+        except MemoryIntegrityError:
+            return None
+        release_marker = run.get("release_success_marker", "")
+        run = memory.record_release_outcome(
+            session_id,
+            success=tool_succeeded(event, expected_marker=release_marker),
+        )
         return {
             "hookSpecificOutput": {
                 "hookEventName": "PostToolUse",

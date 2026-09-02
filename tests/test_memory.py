@@ -154,6 +154,18 @@ def test_intervention_from_wrong_repo_is_rejected(tmp_path):
         memory.record_intervention(signed_record("repo-a", owner.key.hex(), owner.address))
 
 
+def test_existing_lesson_closer_cannot_be_replaced(tmp_path):
+    owner = Account.create()
+    attacker = Account.create()
+    memory = InterventionMemory(tmp_path / "memory.db", "repo-a")
+    memory.record_intervention(signed_record("repo-a", owner.key.hex(), owner.address))
+
+    with pytest.raises(MemoryIntegrityError, match="already anchored"):
+        memory.record_intervention(
+            signed_record("repo-a", attacker.key.hex(), attacker.address)
+        )
+
+
 def test_open_run_survives_followup_prompt(tmp_path):
     owner = Account.create()
     memory = InterventionMemory(tmp_path / "memory.db", "repo-a")

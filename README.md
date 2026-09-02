@@ -26,6 +26,25 @@ comeback init
 
 `comeback init` merges Comeback into existing `.codex/hooks.json` and `.claude/settings.json` files, installs the narrow release-safety Skill, and ignores the repository-local Sibyl database. It does not overwrite unrelated hooks or Skills. Review and approve the project hooks when Codex or Claude Code asks.
 
+If `pipx` is unavailable, install with `uv`:
+
+```bash
+uv tool install git+https://github.com/qdeeworld/comeback.git
+cd your-repository
+comeback init
+```
+
+For development from a clone on a host without `python3-venv` or `ensurepip`:
+
+```bash
+uv venv .uvenv
+uv pip install -e '.[dev]' --python .uvenv/bin/python
+.uvenv/bin/pytest -q
+.uvenv/bin/python scripts/run_validation_gate.py
+```
+
+Always run `comeback init` with the installed environment's `comeback` executable. The installer writes the resolved `comeback-hook` path into both agent configurations; the repository does not assume a `.venv` directory name.
+
 To turn a real human correction into enforceable memory:
 
 ```bash
@@ -50,9 +69,9 @@ comeback intervene \
   --signature "$signature"
 ```
 
-The wallet never authorizes a transaction. Its signature prevents the coding agent, repository content, or another user from inventing or closing an intervention.
+The wallet never authorizes a transaction. The first signed intervention is a local trust-on-first-use anchor for that lesson. Later records cannot replace its authorized closer, and only that closer can approve the supervised action. A future external trust registry is required to protect the first anchor from an agent that can replace the entire local store.
 
-In the fresh supervised session, run the exact checkpoint Comeback recalls. For `HUMAN_REQUIRED`, prepare and sign the approval from a separate terminal:
+In the fresh supervised session, run the exact checkpoint invocation Comeback recalls. New interventions bind a random signed success marker to that invocation, so Codex's stdout-only hook response records evidence only when the shell reaches the marker after a zero exit. For `HUMAN_REQUIRED`, prepare and sign the approval from a separate terminal:
 
 ```bash
 comeback prepare-approval --latest > comeback-approval.json
@@ -70,6 +89,8 @@ comeback approve \
 Sibyl is the only store for repository-specific intervention lessons, supervision runs, required checkpoints, approvals and outcomes. The hooks contain generic task classification and enforcement mechanics but no copied intervention or mode.
 
 Remove the Sibyl state and the same fresh release request becomes `AUTONOMOUS`; its task-specific checkpoint and human-approval requirement disappear. That materially breaks adaptive supervision.
+
+Comeback currently recognizes a bounded set of direct release commands and common spellings such as `command git push`, absolute executable paths, and package-manager deploy scripts. It is not a general shell sandbox: arbitrary aliases or custom wrappers can hide an equivalent deployment from a syntactic hook. Real release authority therefore requires credentials to be exposed only through a protected capability, not broadly inside the agent process.
 
 The memory call sites are:
 
@@ -90,7 +111,7 @@ python3 -m venv .venv
 .venv/bin/python scripts/run_cross_agent_gate.py
 ```
 
-The first gate runs signed intervention, five fresh-session blocks, Codex-to-Claude recall, malicious-prompt resistance, low-risk autonomy, evidence, unauthorized and authorized approval, outcome evolution, and Claude-side memory ablation. The second starts a real ephemeral Codex process and proves the project hook blocks before the release marker is created. The third performs the same boundary test in a real Claude Code process and requires an authenticated local Claude Code installation.
+The first gate runs signed intervention, five fresh-session blocks, Codex-to-Claude recall, malicious-prompt resistance, low-risk autonomy, evidence, unauthorized and authorized approval, outcome evolution, and Claude-side memory ablation. The second starts two real ephemeral Codex processes: one proves the hook blocks before the release side effect, and the next proves the complete checkpoint → authorized release → successful outcome loop using exit-bound markers. The third performs the boundary test in a real Claude Code process and requires an authenticated local Claude Code installation.
 
 Every push also runs the deterministic fresh-session gate publicly in GitHub Actions and uploads its complete JSON replay artifact. The real Codex and Claude Code hook gates remain local authenticated checks because CI does not receive either account credential.
 

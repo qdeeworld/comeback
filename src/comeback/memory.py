@@ -77,6 +77,12 @@ def validate_run(body: Any) -> dict[str, Any]:
     run = deepcopy(body)
     if not isinstance(run.get("checkpoint_command"), str):
         raise MemoryIntegrityError("run checkpoint_command is invalid")
+    if not isinstance(run.get("checkpoint_success_marker", ""), str):
+        raise MemoryIntegrityError("run checkpoint_success_marker is invalid")
+    run["checkpoint_success_marker"] = run.get("checkpoint_success_marker", "")
+    if not isinstance(run.get("release_success_marker", ""), str):
+        raise MemoryIntegrityError("run release_success_marker is invalid")
+    run["release_success_marker"] = run.get("release_success_marker", "")
     run["lesson_ids"] = _strings(run.get("lesson_ids"), "lesson_ids")
     run["required_evidence"] = _strings(run.get("required_evidence"), "required_evidence")
     run["satisfied_evidence"] = _strings(run.get("satisfied_evidence"), "satisfied_evidence")
@@ -107,6 +113,10 @@ class InterventionMemory:
         revision = 1
         try:
             prior = validate_lesson(self.client.get_entity(self.LESSON_CATEGORY, lesson_id).get("body"))
+            if closer != prior["authorized_closer"]:
+                raise MemoryIntegrityError(
+                    "authorized closer is already anchored for this intervention lesson"
+                )
             failures = prior["failure_count"] + 1
             successes = prior["success_count"]
             revision = prior["revision"] + 1
@@ -175,6 +185,12 @@ class InterventionMemory:
         checkpoint_commands = {lesson["checkpoint_command"].strip() for lesson in lessons}
         if len(checkpoint_commands) > 1:
             raise MemoryIntegrityError("conflicting remembered checkpoint commands require operator resolution")
+        checkpoint_markers = {lesson.get("checkpoint_success_marker", "") for lesson in lessons}
+        if len(checkpoint_markers) > 1:
+            raise MemoryIntegrityError("conflicting checkpoint success markers require operator resolution")
+        release_markers = {lesson.get("release_success_marker", "") for lesson in lessons}
+        if len(release_markers) > 1:
+            raise MemoryIntegrityError("conflicting release success markers require operator resolution")
         rank = {"AUTONOMOUS": 0, "CHECKPOINTED": 1, "HUMAN_REQUIRED": 2}
         mode = max((lesson["current_mode"] for lesson in lessons), key=rank.get, default="AUTONOMOUS")
         run = {
@@ -188,6 +204,8 @@ class InterventionMemory:
             "mode": mode,
             "lesson_ids": sorted(lesson["lesson_id"] for lesson in lessons),
             "checkpoint_command": next(iter(checkpoint_commands), ""),
+            "checkpoint_success_marker": next(iter(checkpoint_markers), ""),
+            "release_success_marker": next(iter(release_markers), ""),
             "required_evidence": requirements_for_mode(mode),
             "satisfied_evidence": [],
             "status": "open",
