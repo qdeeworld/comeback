@@ -16,18 +16,10 @@ from eth_account import Account
 from eth_account.messages import encode_defunct
 
 from comeback.identity import repository_identity
-from comeback.installer import install_repository
+from comeback.installer import install_repository, resolve_hook_executable
 from comeback.memory import InterventionMemory
 from comeback.policy import checkpoint_invocation
 from comeback.signing import approval_message, intervention_message
-
-
-def _hook_executable() -> Path:
-    base = Path(sys.executable).with_name("comeback-hook")
-    for candidate in (base, base.with_suffix(".exe")):
-        if candidate.exists():
-            return candidate
-    raise RuntimeError(f"Comeback hook was not found: {base}")
 
 
 def main() -> None:
@@ -36,7 +28,7 @@ def main() -> None:
     ) as directory:
         root = Path(directory)
         subprocess.run(["git", "init", "-q", str(root)], check=True)
-        hook_executable = _hook_executable()
+        hook_executable = resolve_hook_executable()
         install_repository(root, executable=hook_executable)
         marker = root / "release-executed.json"
         python_command = shlex.quote(sys.executable)

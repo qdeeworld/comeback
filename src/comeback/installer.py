@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import shlex
 import shutil
+import sys
 from importlib.resources import files
 from pathlib import Path
 from typing import Any
@@ -21,6 +22,22 @@ def _quote_command_part(value: str) -> str:
     # Codex and Claude project hooks are shell commands. Claude Code uses Git
     # Bash for them on Windows, so cmd.exe quoting is incorrect there too.
     return shlex.quote(value)
+
+
+def resolve_hook_executable(python_executable: str | Path | None = None) -> Path:
+    discovered = shutil.which("comeback-hook")
+    if discovered:
+        return Path(discovered).resolve()
+    # Keep the launcher path itself: virtual-environment Python binaries are
+    # often symlinks, and resolving one would leave its sibling entry points.
+    python = Path(python_executable or sys.executable).expanduser().absolute()
+    adjacent = python.with_name("comeback-hook")
+    scripts = python.parent / "Scripts" / "comeback-hook"
+    for base in (adjacent, scripts):
+        for candidate in (base, base.with_suffix(".exe")):
+            if candidate.exists():
+                return candidate.resolve()
+    raise RuntimeError("comeback-hook is not available on PATH or beside the active Python")
 
 
 def hook_groups(executable: Path) -> dict[str, list[dict[str, Any]]]:
@@ -114,10 +131,7 @@ def _write_text(path: Path, text: str) -> None:
 def install_repository(repo: str | Path, *, executable: Path | None = None) -> dict[str, Any]:
     root = repository_root(repo)
     if executable is None:
-        discovered = shutil.which("comeback-hook")
-        if not discovered:
-            raise RuntimeError("comeback-hook is not available on PATH")
-        executable = Path(discovered)
+        executable = resolve_hook_executable()
     if not executable.exists():
         raise RuntimeError(f"Comeback hook executable was not found: {executable}")
 

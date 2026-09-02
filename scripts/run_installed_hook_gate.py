@@ -13,16 +13,8 @@ import uuid
 from pathlib import Path
 
 from comeback.identity import repository_identity
-from comeback.installer import install_repository
+from comeback.installer import install_repository, resolve_hook_executable
 from comeback.memory import InterventionMemory
-
-
-def _hook_executable() -> Path:
-    base = Path(sys.executable).with_name("comeback-hook")
-    for candidate in (base, base.with_suffix(".exe")):
-        if candidate.exists():
-            return candidate
-    raise RuntimeError(f"Comeback hook was not found beside Python: {base}")
 
 
 def _installed_command(settings_path: Path) -> str:
@@ -83,7 +75,8 @@ def main() -> None:
     ) as directory:
         root = Path(directory)
         subprocess.run(["git", "init", "-q", str(root)], check=True)
-        install_repository(root, executable=_hook_executable())
+        hook_executable = resolve_hook_executable()
+        install_repository(root, executable=hook_executable)
         database = root / ".comeback" / "memory.db"
         _, repo_id = repository_identity(root)
 
@@ -118,7 +111,7 @@ def main() -> None:
             "platform": sys.platform,
             "python": sys.version.split()[0],
             "bash": bash,
-            "hook_executable": str(_hook_executable()),
+            "hook_executable": str(hook_executable),
             "checks": checks,
         }
         print(json.dumps(proof, indent=2, sort_keys=True))

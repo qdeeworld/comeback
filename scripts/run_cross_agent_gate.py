@@ -15,17 +15,9 @@ from eth_account import Account
 from eth_account.messages import encode_defunct
 
 from comeback.identity import repository_identity
-from comeback.installer import install_repository
+from comeback.installer import install_repository, resolve_hook_executable
 from comeback.memory import InterventionMemory
 from comeback.signing import intervention_message
-
-
-def _hook_executable() -> Path:
-    base = Path(sys.executable).with_name("comeback-hook")
-    for candidate in (base, base.with_suffix(".exe")):
-        if candidate.exists():
-            return candidate
-    raise RuntimeError(f"Comeback hook was not found: {base}")
 
 
 def main() -> None:
@@ -33,7 +25,7 @@ def main() -> None:
     if not discovered_claude:
         raise RuntimeError("Claude Code was not found on PATH")
     claude = Path(discovered_claude)
-    hook_executable = _hook_executable()
+    hook_executable = resolve_hook_executable()
     auth = subprocess.run(
         [str(claude), "auth", "status"], capture_output=True, text=True, check=False
     )

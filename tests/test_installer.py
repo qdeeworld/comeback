@@ -3,7 +3,11 @@ import shlex
 from importlib.resources import files
 from pathlib import Path
 
-from comeback.installer import _quote_command_part, install_repository
+from comeback.installer import (
+    _quote_command_part,
+    install_repository,
+    resolve_hook_executable,
+)
 
 
 def test_install_is_idempotent_and_preserves_other_hooks(tmp_path: Path):
@@ -86,3 +90,15 @@ def test_windows_hook_paths_are_quoted_for_the_posix_shell_used_by_agent_hooks()
         quoted = _quote_command_part(path)
         assert quoted != path
         assert shlex.split(quoted, posix=True) == [path]
+
+
+def test_hook_resolver_supports_windows_system_python_scripts_directory(
+    tmp_path: Path, monkeypatch
+):
+    monkeypatch.setattr("comeback.installer.shutil.which", lambda _: None)
+    python = tmp_path / "python.exe"
+    executable = tmp_path / "Scripts" / "comeback-hook.exe"
+    executable.parent.mkdir()
+    executable.write_text("", encoding="utf-8")
+
+    assert resolve_hook_executable(python) == executable.resolve()
