@@ -1,4 +1,5 @@
 import json
+import shlex
 from importlib.resources import files
 from pathlib import Path
 
@@ -75,8 +76,11 @@ def test_packaged_skill_matches_repository_skill():
     assert packaged == repository
 
 
-def test_windows_hook_path_uses_cmd_compatible_quoting(monkeypatch):
-    monkeypatch.setattr("comeback.installer.os.name", "nt")
-    assert _quote_command_part(r"C:\Program Files\Comeback\comeback-hook.exe") == (
-        '"C:\\Program Files\\Comeback\\comeback-hook.exe"'
-    )
+def test_windows_hook_paths_are_quoted_for_the_posix_shell_used_by_agent_hooks():
+    for path in (
+        r"C:\Users\me\AppData\Local\venv\Scripts\comeback-hook.exe",
+        r"C:\Program Files\Comeback\comeback-hook.exe",
+    ):
+        quoted = _quote_command_part(path)
+        assert quoted != path
+        assert shlex.split(quoted, posix=True) == [path]

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 import shlex
-from pathlib import PurePath
+from pathlib import Path, PurePath
 from typing import Any
 
 
@@ -179,11 +179,55 @@ def checkpoint_invocation(command: str, success_marker: str) -> str:
     return f"({command}) && printf '\\n{success_marker}\\n'"
 
 
-def is_success_wrapped(command: str, success_marker: str) -> bool:
+def _command_after_same_directory_prefix(
+    command: str, working_directory: str | Path | None
+) -> str | None:
+    candidate = command.strip()
+    match = re.fullmatch(r"cd\s+(.+?)\s*&&\s*(.+)", candidate, flags=re.DOTALL)
+    if not match:
+        return candidate
+    if working_directory is None:
+        return None
+    try:
+        path_words = shlex.split(match.group(1), posix=True)
+    except ValueError:
+        return None
+    if len(path_words) != 1:
+        return None
+    target = Path(path_words[0]).expanduser()
+    if not target.is_absolute():
+        target = Path(working_directory) / target
+    try:
+        if target.resolve() != Path(working_directory).resolve():
+            return None
+    except OSError:
+        return None
+    return match.group(2).strip()
+
+
+def invocation_matches(
+    command: str,
+    expected_invocation: str,
+    *,
+    working_directory: str | Path | None = None,
+) -> bool:
+    candidate = _command_after_same_directory_prefix(command, working_directory)
+    return candidate is not None and candidate == expected_invocation.strip()
+
+
+def is_success_wrapped(
+    command: str,
+    success_marker: str,
+    *,
+    working_directory: str | Path | None = None,
+) -> bool:
     if not success_marker:
         return True
+    candidate = _command_after_same_directory_prefix(command, working_directory)
+    if candidate is None:
+        return False
     suffix = f") && printf '\\n{success_marker}\\n'"
-    return command.strip().startswith("(") and command.strip().endswith(suffix)
+    return candidate.startswith("(") and candidate.endswith(suffix)
 
 
 def tool_succeeded(event: dict[str, Any], *, expected_marker: str = "") -> bool:

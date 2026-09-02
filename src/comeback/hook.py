@@ -12,6 +12,7 @@ from .policy import (
     checkpoint_invocation,
     classify_task,
     command_from_event,
+    invocation_matches,
     is_success_wrapped,
     is_release_action,
     tool_succeeded,
@@ -106,7 +107,9 @@ def handle(event: dict[str, Any]) -> dict[str, Any] | None:
             )
         release_marker = run.get("release_success_marker", "")
         release_command = command_from_event(event).strip()
-        if release_marker and not is_success_wrapped(release_command, release_marker):
+        if release_marker and not is_success_wrapped(
+            release_command, release_marker, working_directory=root
+        ):
             protected_command = checkpoint_invocation(release_command, release_marker)
             return _deny(
                 "Comeback requires an exit-bound release receipt. Run exactly: "
@@ -127,7 +130,11 @@ def handle(event: dict[str, Any]) -> dict[str, Any] | None:
         checkpoint_command = run.get("checkpoint_command", "") if run else ""
         checkpoint_marker = run.get("checkpoint_success_marker", "") if run else ""
         expected_invocation = checkpoint_invocation(checkpoint_command, checkpoint_marker)
-        is_checkpoint = bool(checkpoint_command) and command_from_event(event).strip() == expected_invocation
+        is_checkpoint = bool(checkpoint_command) and invocation_matches(
+            command_from_event(event),
+            expected_invocation,
+            working_directory=root,
+        )
     else:
         is_checkpoint = False
 

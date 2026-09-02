@@ -1,8 +1,11 @@
+import shlex
+
 import pytest
 
 from comeback.policy import (
     checkpoint_invocation,
     classify_task,
+    invocation_matches,
     is_success_wrapped,
     is_release_action,
     mode_for_outcomes,
@@ -99,6 +102,31 @@ def test_checkpoint_invocation_prints_signed_marker_only_after_success():
         "COMEBACK_CHECK_OK_123",
     )
     assert not is_success_wrapped("pnpm test", "COMEBACK_CHECK_OK_123")
+
+
+def test_same_repository_cd_prefix_preserves_exact_checkpoint_and_release_receipt(tmp_path):
+    invocation = checkpoint_invocation("pnpm test", "COMEBACK_CHECK_OK_123")
+    prefixed = f"cd {shlex.quote(str(tmp_path))} && {invocation}"
+
+    assert invocation_matches(prefixed, invocation, working_directory=tmp_path)
+    assert is_success_wrapped(
+        prefixed,
+        "COMEBACK_CHECK_OK_123",
+        working_directory=tmp_path,
+    )
+
+
+def test_cd_prefix_cannot_substitute_another_repository(tmp_path):
+    invocation = checkpoint_invocation("pnpm test", "COMEBACK_CHECK_OK_123")
+    other = tmp_path / "other"
+    prefixed = f"cd {shlex.quote(str(other))} && {invocation}"
+
+    assert not invocation_matches(prefixed, invocation, working_directory=tmp_path)
+    assert not is_success_wrapped(
+        prefixed,
+        "COMEBACK_CHECK_OK_123",
+        working_directory=tmp_path,
+    )
 
 
 def test_direct_string_hook_response_requires_the_expected_marker():

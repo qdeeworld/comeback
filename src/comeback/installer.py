@@ -1,10 +1,8 @@
 from __future__ import annotations
 
 import json
-import os
 import shlex
 import shutil
-import subprocess
 from importlib.resources import files
 from pathlib import Path
 from typing import Any
@@ -20,8 +18,8 @@ def _hook_handler(command: str, status: str | None = None) -> dict[str, Any]:
 
 
 def _quote_command_part(value: str) -> str:
-    if os.name == "nt":
-        return subprocess.list2cmdline([value])
+    # Codex and Claude project hooks are shell commands. Claude Code uses Git
+    # Bash for them on Windows, so cmd.exe quoting is incorrect there too.
     return shlex.quote(value)
 
 
