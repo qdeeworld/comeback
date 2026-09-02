@@ -52,7 +52,7 @@ def _run_hook(
     if completed.returncode != 0:
         raise RuntimeError(
             f"installed hook returned {completed.returncode}: "
-            f"{completed.stdout} {completed.stderr}"
+            f"command={command!r}; {completed.stdout} {completed.stderr}"
         )
     try:
         output = json.loads(completed.stdout)
