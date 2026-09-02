@@ -1,5 +1,7 @@
 from datetime import datetime, timezone
 
+from pathlib import Path
+
 import pytest
 from eth_account import Account
 from eth_account.messages import encode_defunct
