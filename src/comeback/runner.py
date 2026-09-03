@@ -9,6 +9,10 @@ import time
 from pathlib import Path
 
 
+_WINDOWS_JOB_SETTLE_SECONDS = 0.5
+_WINDOWS_JOB_SETTLE_INTERVAL_SECONDS = 0.01
+
+
 def _write_ready(path: Path) -> None:
     temporary = path.with_suffix(path.suffix + ".tmp")
     descriptor = os.open(temporary, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
@@ -23,8 +27,8 @@ def _write_ready(path: Path) -> None:
     os.replace(temporary, path)
 
 
-def _windows_job_for(process: subprocess.Popen[bytes]):
-    """Put the target tree in a kill-on-close Job Object on Windows."""
+def _windows_containment_job():
+    """Put this runner in a kill-on-close Job before it creates any target."""
 
     import ctypes
     from ctypes import wintypes
@@ -77,14 +81,15 @@ def _windows_job_for(process: subprocess.Popen[bytes]):
     kernel32.SetInformationJobObject.restype = wintypes.BOOL
     kernel32.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
     kernel32.AssignProcessToJobObject.restype = wintypes.BOOL
-    kernel32.TerminateJobObject.argtypes = [wintypes.HANDLE, wintypes.UINT]
-    kernel32.TerminateJobObject.restype = wintypes.BOOL
+    kernel32.GetCurrentProcess.argtypes = []
+    kernel32.GetCurrentProcess.restype = wintypes.HANDLE
     kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
     kernel32.CloseHandle.restype = wintypes.BOOL
 
     job = kernel32.CreateJobObjectW(None, None)
     if not job:
-        raise OSError(ctypes.get_last_error(), "CreateJobObjectW failed")
+        error = ctypes.get_last_error()
+        raise OSError(error, "CreateJobObjectW failed")
     information = JOBOBJECT_EXTENDED_LIMIT_INFORMATION()
     information.BasicLimitInformation.LimitFlags = job_object_limit_kill_on_job_close
     if not kernel32.SetInformationJobObject(
@@ -96,35 +101,19 @@ def _windows_job_for(process: subprocess.Popen[bytes]):
         error = ctypes.get_last_error()
         kernel32.CloseHandle(job)
         raise OSError(error, "SetInformationJobObject failed")
-    if not kernel32.AssignProcessToJobObject(job, wintypes.HANDLE(process._handle)):
+    if not kernel32.AssignProcessToJobObject(job, kernel32.GetCurrentProcess()):
         error = ctypes.get_last_error()
-        process.terminate()
-        process.wait(timeout=10)
         kernel32.CloseHandle(job)
         raise OSError(error, "AssignProcessToJobObject failed")
+    # Do not close this handle while the runner is alive. The operating system
+    # closes it on runner exit, and KILL_ON_JOB_CLOSE then terminates every
+    # surviving descendant. Children created below inherit this job before
+    # their first user-mode instruction, so there is no Popen-to-assign gap.
     return kernel32, job
 
 
-def _resume_windows_process(process: subprocess.Popen[bytes]) -> None:
-    """Resume a process created suspended, after it is contained in its Job."""
-
-    import ctypes
-    from ctypes import wintypes
-
-    # subprocess intentionally closes CreateProcess' primary-thread handle.
-    # NtResumeProcess resumes every thread through the process handle that
-    # Popen retains.  The target is still fully suspended until this call, so
-    # it cannot escape before AssignProcessToJobObject succeeds.
-    ntdll = ctypes.WinDLL("ntdll", use_last_error=True)
-    ntdll.NtResumeProcess.argtypes = [wintypes.HANDLE]
-    ntdll.NtResumeProcess.restype = ctypes.c_long
-    status = ntdll.NtResumeProcess(wintypes.HANDLE(process._handle))
-    if status != 0:
-        raise OSError(f"NtResumeProcess failed with NTSTATUS 0x{status & 0xFFFFFFFF:08x}")
-
-
-def _windows_job_has_active_processes(kernel32, job) -> bool:
-    """Report whether target descendants remain after the leader exits."""
+def _windows_job_active_processes(kernel32, job) -> int:
+    """Count this runner and every live target descendant in its Job."""
 
     import ctypes
     from ctypes import wintypes
@@ -160,7 +149,18 @@ def _windows_job_has_active_processes(kernel32, job) -> bool:
         ctypes.byref(returned),
     ):
         raise OSError(ctypes.get_last_error(), "QueryInformationJobObject failed")
-    return information.ActiveProcesses > 0
+    return int(information.ActiveProcesses)
+
+
+def _wait_for_windows_job_to_settle(kernel32, job) -> int:
+    """Allow Windows a bounded interval to retire an exited target from its Job."""
+
+    deadline = time.monotonic() + _WINDOWS_JOB_SETTLE_SECONDS
+    while True:
+        active_processes = _windows_job_active_processes(kernel32, job)
+        if active_processes <= 1 or time.monotonic() >= deadline:
+            return active_processes
+        time.sleep(_WINDOWS_JOB_SETTLE_INTERVAL_SECONDS)
 
 
 def run(
@@ -173,6 +173,12 @@ def run(
 ) -> int:
     if not command:
         raise ValueError("runner command is empty")
+    kernel32 = None
+    job = None
+    if os.name == "nt":
+        # Readiness on Windows means containment is already armed. The target
+        # does not exist yet and cannot be orphaned outside the job.
+        kernel32, job = _windows_containment_job()
     _write_ready(ready)
     deadline = time.monotonic() + wait_seconds
     while True:
@@ -193,36 +199,16 @@ def run(
         os.execvpe(command[0], command, os.environ.copy())
         raise AssertionError("exec returned")  # pragma: no cover
 
-    # The Windows target is born suspended.  Only after it is assigned to a
-    # kill-on-close Job Object may any of its instructions execute.  This
-    # closes the launch/containment race that a normal Popen-then-assign flow
-    # would leave open.
-    create_suspended = 0x00000004
-    process = subprocess.Popen(
-        command,
-        shell=False,
-        creationflags=create_suspended | subprocess.CREATE_NEW_PROCESS_GROUP,
-    )
-    kernel32 = None
-    job = None
-    try:
-        kernel32, job = _windows_job_for(process)
-        try:
-            _resume_windows_process(process)
-        except Exception:
-            kernel32.TerminateJobObject(job, 126)
-            kernel32.CloseHandle(job)
-            job = None
-            process.wait(timeout=10)
-            raise
-        exit_code = process.wait()
-        if _windows_job_has_active_processes(kernel32, job):
-            kernel32.TerminateJobObject(job, 124)
-            return 124
-        return exit_code
-    finally:
-        if job is not None and kernel32 is not None:
-            kernel32.CloseHandle(job)
+    process = subprocess.Popen(command, shell=False)
+    exit_code = process.wait()
+    active_processes = _wait_for_windows_job_to_settle(kernel32, job)
+    if active_processes > 1:
+        # Returning 124 makes the outer capability record UNKNOWN. When this
+        # runner exits, the still-open job handle closes and kills descendants.
+        return 124
+    if active_processes != 1:
+        raise RuntimeError("Windows containment job lost the runner identity")
+    return exit_code
 
 
 def main() -> None:

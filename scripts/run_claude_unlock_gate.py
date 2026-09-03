@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Prove the signed checkpoint-to-release loop in a real Claude Code process."""
+"""Prove a fresh Claude process uses an evolved signed capability loop."""
 
 from __future__ import annotations
 
@@ -223,9 +223,9 @@ def run_gate() -> tuple[dict[str, Any], int]:
                 }
             )
 
-            # Complete one real signed capability run to evolve the remembered
-            # intervention from HUMAN_REQUIRED to CHECKPOINTED.
-            phase = "seed_real_success"
+            # Complete one direct harness-driven signed capability run to
+            # evolve the intervention from HUMAN_REQUIRED to CHECKPOINTED.
+            phase = "seed_direct_success"
             setup_session = "setup-success-" + str(uuid.uuid4())
             memory.start_run(
                 session_id=setup_session,
@@ -278,6 +278,7 @@ def run_gate() -> tuple[dict[str, Any], int]:
                 "_comeback_cli_executable": str(
                     cli_executable_for_hook(hook_executable)
                 ),
+                "_comeback_memory_db": str(database.resolve()),
             }
             checkpoint_capability = capability_invocation(
                 capability_event,
@@ -316,7 +317,7 @@ def run_gate() -> tuple[dict[str, Any], int]:
                 ),
                 "seed_release_success": release_result.get("outcome") == "success",
                 "fresh_session_seen": fresh_run["session_id"] == fresh_session,
-                "source_agent_is_codex": signed_fields["agent_family"] == "Codex",
+                "source_fixture_declares_codex": signed_fields["agent_family"] == "Codex",
                 "fresh_agent_is_claude": fresh_run.get("agent_family") == "ClaudeCode",
                 "mode_evolved_to_checkpointed": fresh_run.get("mode") == "CHECKPOINTED",
                 "checkpoint_receipt_recorded": isinstance(receipt, dict)
@@ -337,8 +338,8 @@ def run_gate() -> tuple[dict[str, Any], int]:
                     timeout=60,
                     check=True,
                 ).stdout.strip(),
-                "source_agent": "Codex",
-                "source_session": source_session,
+                "source_fixture_agent": "Codex",
+                "source_fixture_session": source_session,
                 "canary_session": canary_session,
                 "fresh_agent": fresh_run.get("agent_family"),
                 "fresh_claude_session": fresh_session,

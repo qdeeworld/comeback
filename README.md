@@ -19,7 +19,7 @@ Unrelated low-risk work remains `AUTONOMOUS`.
 ## Prerequisites
 
 - Git and a Git repository with at least one commit.
-- An installed and authenticated coding agent. Codex CLI stable `0.150.0` or newer is the supported floor; current stable is recommended. `0.150.0-alpha.12.2` has the required hook machinery, but it is a prerelease and is not the supported default.
+- An installed and authenticated coding agent. Codex CLI `0.152.1` is the version exercised by the authenticated gate. The externally reported `0.150.0-alpha.12.2` Windows build is not supported; regardless of version, `comeback doctor` must prove real lifecycle activation before use.
 - [`uv`](https://docs.astral.sh/uv/getting-started/installation/). It can install the required Python automatically.
 - Git Bash only when using Claude Code on Windows.
 
@@ -168,13 +168,13 @@ New interventions default to `--agent-scope all_supported`, so a Codex correctio
 End the original agent process and start a genuinely fresh one with only the related release request. Comeback injects commands tied to that exact session:
 
 ```text
-ABSOLUTE_COMEBACK_PATH checkpoint --session-id FRESH_SESSION_ID
-ABSOLUTE_COMEBACK_PATH release --session-id FRESH_SESSION_ID
+ABSOLUTE_COMEBACK_PATH --db ABSOLUTE_MEMORY_DB checkpoint --session-id FRESH_SESSION_ID
+ABSOLUTE_COMEBACK_PATH --db ABSOLUTE_MEMORY_DB release --session-id FRESH_SESSION_ID
 ```
 
 The actual injected commands contain the absolute path to the installed `comeback` or `comeback.exe`. Copy them exactly. Relative substitutes such as `comeback`, `./comeback`, extra flags, another session ID, or appended shell input are rejected by the hook.
 
-The checkpoint capability executes the signed argument array with `shell=False` inside a managed process-tree boundary. A timeout or surviving background process is stopped and cannot mint a receipt. A successful foreground exit records a receipt containing the repository fingerprint; model-reported output is never evidence. In `HUMAN_REQUIRED`, the developer then approves from a separate native terminal:
+The checkpoint capability resolves the signed executable once against the repository's captured PATH, fingerprints that absolute file, and executes that same absolute executable with the signed argument array and `shell=False` inside a managed process-tree boundary. With no operator override it uses the signed timeout; `--timeout` may only shorten that limit. Starting any recheck durably revokes the prior checkpoint receipt and human approval under a unique attempt nonce before the command can run. A failure, timeout, interruption, or overlapping/stale completion therefore cannot leave the older evidence authorized. A timeout or surviving background process is stopped and cannot mint a receipt. Windows `.bat` and `.cmd` launchers are refused because Windows may pass them through a command shell even with `shell=False`; use a native executable or an explicit Python/Node executable instead. A successful foreground exit records a receipt containing the repository fingerprint; model-reported output is never evidence. In `HUMAN_REQUIRED`, the developer then approves from a separate native terminal:
 
 ```text
 comeback approve --session-id FRESH_SESSION_ID
@@ -212,7 +212,7 @@ The main call sites are:
 
 ## Security boundary
 
-Comeback protects the configured release argument vector through its exact capability. Its raw-command detection is only defense in depth, not a general shell sandbox or complete command mediation layer. It recognizes direct release commands and common indirection, but a custom executable, unsupported tool, or another process can hide or perform an equivalent action. The capability is narrower: it receives no runtime command override and executes the signed argument array with `shell=False`. Never place passwords, private keys, API tokens, or credential-bearing URLs in a checkpoint or release argument array; use an operating-system credential helper or a future broker.
+Comeback protects the configured release argument vector through its exact capability. Its raw-command detection is only defense in depth, not a general shell sandbox or complete command mediation layer. It recognizes direct release commands and common indirection, but a custom executable, unsupported tool, or another process can hide or perform an equivalent action. The capability is narrower: it receives no runtime command override and executes the preflight-resolved absolute executable with the signed argument array and `shell=False`. Windows batch launchers are not accepted. Never place passwords, private keys, API tokens, or credential-bearing URLs in a checkpoint or release argument array; use an operating-system credential helper or a future broker.
 
 The checkpoint receipt correlates the signed checkpoint specification, repository/execution-context fingerprint, timestamps, session, and zero exit code. Its digest is an integrity and correlation checksum, not a signature, remote attestation, or independent proof that the check was semantically sufficient. The fingerprint covers Git-visible state, effective Git configuration and hooks, the resolved direct executable and direct file arguments, and selected environment variables at preflight. It does not freeze ignored files, inputs opened transitively by a custom executable, remote network responses, or changes made concurrently after the final preflight check. Only the direct Git-push capability pins its source artifact to an immutable approved commit. An attacker running as the same operating-system user who can replace the Sibyl database or call its local write API can forge or substitute receipt state.
 
@@ -246,7 +246,7 @@ uv pip install -e ".[dev]" --python .uvenv\Scripts\python.exe
 .uvenv\Scripts\python.exe scripts\run_codex_hook_gate.py
 ```
 
-The deterministic gate proves five fresh-session denials, Codex-to-Claude recall, malicious-prompt resistance, low-risk autonomy, signed checkpoint/approval/release, evolving supervision, and memory ablation. The installed-hook gate uses the generated POSIX command for Claude and the generated `commandWindows` through native PowerShell and `cmd.exe` for Codex. The real Codex gate first proves hook activation with a harmless canary, then proves a fresh block and a complete capability loop in separate ephemeral processes.
+The deterministic gate proves five fresh-session denials, a simulated Codex-to-Claude scope transition, malicious-prompt resistance, low-risk autonomy, signed checkpoint/approval/release, evolving supervision, and memory ablation. The installed-hook gate uses the generated POSIX command for Claude and the generated `commandWindows` through native PowerShell and `cmd.exe` for Codex. The real Codex gate proves a real Codex source session and a separate fresh Codex denial. Its setup then completes a signed `HUMAN_REQUIRED` capability run directly before a final fresh Codex process exercises the evolved `CHECKPOINTED` capability; it is activation and enforcement evidence, not one unbroken all-agent-driven approval journey.
 
 The real Codex gate requires an authenticated local Codex CLI. Its explicit trust override and hook-trust bypass apply only to its newly created disposable repository; they are not the user onboarding path.
 
@@ -266,7 +266,9 @@ Windows PowerShell:
 .uvenv\Scripts\python.exe scripts\run_claude_unlock_gate.py
 ```
 
-The first real Claude gate proves a Codex intervention is recalled and blocks a genuinely fresh Claude session. The second proves Claude's checkpoint, authorized release, stored success, and evolved supervision in another fresh journey.
+The first authenticated Claude gate proves that a genuinely fresh Claude session recalls and blocks on an intervention whose Codex source run is seeded as a fixture. The second first seeds an owner-approved capability success directly, then proves a genuinely fresh Claude process recalls the evolved `CHECKPOINTED` mode, invokes its checkpoint and release capabilities, creates the side effect, and stores success. Neither script claims that its seeded Codex source was a real Codex process or that Claude performed the earlier owner approval.
+
+`COMEBACK_MEMORY_DB` is an absolute-path-only diagnostic/development override. Both lifecycle hooks and normal CLI commands resolve it consistently, `comeback status` prints the authoritative selected database and whether an override is active, and hook-injected capability commands carry that exact database with `--db`. Leave the variable unset for the normal repository-local `.comeback/memory.db` journey. If a diagnostic intentionally exports it, use that same exported value—or the printed explicit `--db` path—for every operator-side `status`, `intervene`, `approve`, and `reconcile` command.
 
 GitHub Actions runs the unit, deterministic memory, and installed-launcher gates on Linux and Windows. Authenticated real-agent gates remain release checks outside CI.
 

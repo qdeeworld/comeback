@@ -43,10 +43,17 @@ def test_prepare_sign_and_record_intervention(tmp_path: Path):
         owner.address,
         "--summary",
         "The agent skipped the release check.",
-        "--checkpoint-command",
-        "python -m pytest -q",
-        "--release-command",
-        "git push https://example.test/org/repo.git HEAD:refs/heads/main",
+        "--checkpoint-argv-json",
+        json.dumps(["python", "-m", "pytest", "-q"]),
+        "--release-argv-json",
+        json.dumps(
+            [
+                "git",
+                "push",
+                "https://example.test/org/repo.git",
+                "HEAD:refs/heads/main",
+            ]
+        ),
     )
     signature = Account.sign_message(
         encode_defunct(text=prepared["message_to_sign"]), private_key=owner.key
@@ -94,10 +101,17 @@ def test_prepare_uses_exact_sibyl_run(tmp_path: Path):
         owner.address,
         "--summary",
         "The agent skipped the release gate.",
-        "--checkpoint-command",
-        "pnpm run release:check",
-        "--release-command",
-        "git push https://example.test/org/repo.git HEAD:refs/heads/main",
+        "--checkpoint-argv-json",
+        json.dumps(["pnpm", "run", "release:check"]),
+        "--release-argv-json",
+        json.dumps(
+            [
+                "git",
+                "push",
+                "https://example.test/org/repo.git",
+                "HEAD:refs/heads/main",
+            ]
+        ),
     )
     fields = prepared["record_template"]["signed_fields"]
     status = run_cli(tmp_path, "status")
@@ -160,11 +174,37 @@ def test_prepare_rejects_unknown_source_session(tmp_path: Path):
     assert "no Sibyl supervision run exists" in refusal["reason"]
 
 
-def test_empty_status_explains_hook_recovery(tmp_path: Path):
+def test_empty_status_explains_hook_recovery(tmp_path: Path, monkeypatch):
+    selected = tmp_path / "diagnostic-memory.db"
+    monkeypatch.setenv("COMEBACK_MEMORY_DB", str(selected))
     status = run_cli(tmp_path, "status")
     assert status["health"] == "NO_AGENT_HOOK_RUNS"
+    assert status["memory_database"] == str(selected.resolve())
+    assert status["memory_override_active"] is True
     assert "comeback doctor" in status["next"]
     assert "do not invoke comeback-hook manually" in status["next"]
+
+
+def test_relative_memory_environment_override_is_refused(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("COMEBACK_MEMORY_DB", "relative-memory.db")
+
+    refusal = run_cli(tmp_path, "status", expected=2)
+
+    assert refusal["decision"] == "refuse"
+    assert "absolute path" in refusal["reason"]
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        ["--d", "/tmp/memory.db", "status"],
+        ["--r", "/tmp/repo", "status"],
+        ["release", "--session", "session-id"],
+    ],
+)
+def test_cli_refuses_abbreviated_security_sensitive_options(arguments):
+    with pytest.raises(SystemExit):
+        cli._parser().parse_args(arguments)
 
 
 def test_init_reports_activation_pending_instead_of_claiming_doctor_pass(

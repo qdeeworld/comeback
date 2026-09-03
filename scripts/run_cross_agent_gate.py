@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Prove that a Codex intervention blocks a fresh Claude Code release."""
+"""Prove a seeded Codex-scoped intervention blocks fresh Claude Code."""
 
 from __future__ import annotations
 
@@ -243,7 +243,7 @@ def run_gate() -> tuple[dict[str, Any], int]:
                 "canary_process_ok": canary.returncode == 0,
                 "canary_user_prompt_hook_seen": canary_run["session_id"] == canary_session,
                 "fresh_session_seen": fresh_run["session_id"] == fresh_session,
-                "source_agent_is_codex": signed_fields["agent_family"] == "Codex",
+                "source_fixture_declares_codex": signed_fields["agent_family"] == "Codex",
                 "fresh_agent_is_claude": fresh_run.get("agent_family") == "ClaudeCode",
                 "cross_agent_mode_human_required": fresh_run.get("mode") == "HUMAN_REQUIRED",
                 "release_tool_denied": denied,
@@ -260,8 +260,8 @@ def run_gate() -> tuple[dict[str, Any], int]:
                     timeout=60,
                     check=True,
                 ).stdout.strip(),
-                "source_agent": "Codex",
-                "source_session": source_session,
+                "source_fixture_agent": "Codex",
+                "source_fixture_session": source_session,
                 "canary_session": canary_session,
                 "fresh_agent": fresh_run.get("agent_family"),
                 "fresh_claude_session": fresh_session,

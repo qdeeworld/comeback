@@ -306,7 +306,10 @@ def main() -> None:
                 tool_use_id=str(uuid.uuid4()),
                 tool_input={
                     "command": capability_invocation(
-                        event("PreToolUse", session_two),
+                        {
+                            **event("PreToolUse", session_two),
+                            "_comeback_memory_db": str(live_db.resolve()),
+                        },
                         "release",
                         session_two,
                     )

@@ -21,8 +21,12 @@ _RELEASE_PROMPT_PATTERNS = (
 )
 _PACKAGE_MANAGERS = {"npm", "pnpm", "yarn", "bun"}
 _RELEASE_SCRIPTS = {"deploy", "release", "publish"}
-_SHELLS = {"bash", "dash", "sh", "zsh"}
-_COMMAND_SEPARATORS = {"&&", "||", ";", "|", "&", "\n"}
+_POSIX_SHELLS = {"bash", "dash", "sh", "zsh"}
+_WINDOWS_COMMAND_SHELLS = {"cmd"}
+_POWERSHELLS = {"powershell", "pwsh"}
+_SHELLS = _POSIX_SHELLS | _WINDOWS_COMMAND_SHELLS | _POWERSHELLS
+_COMMAND_SEPARATORS = {"&&", "||", ";", "|", "&", "\n", "(", ")", "{", "}"}
+_CONTROL_PREFIXES = {"if", "then", "else", "elif", "while", "until", "do"}
 
 
 def classify_task(prompt: str) -> tuple[str, str]:
@@ -49,8 +53,31 @@ def is_release_action(event: dict[str, Any]) -> bool:
     return _contains_release_action(words)
 
 
+def comeback_capability_action(event: dict[str, Any]) -> str | None:
+    """Return a Comeback capability subcommand found in a shell tool call.
+
+    Exact invocation matching remains the authority. This parser exists so a
+    relative launcher, alternate database, extra global option, or Python
+    module spelling is recognized and denied rather than silently bypassing
+    the hook's objective decision record.
+    """
+
+    if event.get("tool_name") != "Bash":
+        return None
+    try:
+        words = _shell_words(command_from_event(event))
+    except ValueError:
+        return None
+    actions = {
+        action
+        for segment in _command_segments(words)
+        if (action := _segment_comeback_action(segment)) is not None
+    }
+    return next(iter(actions)) if len(actions) == 1 else ("multiple" if actions else None)
+
+
 def _shell_words(command: str) -> list[str]:
-    lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|\n")
+    lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|\n(){}")
     # Keep unquoted newlines as command separators while shlex still preserves
     # a newline inside quotes as part of the quoted argument.
     lexer.whitespace = " \t\r"
@@ -64,10 +91,20 @@ def _clean_word(word: str) -> str:
     return PurePath(cleaned).name.lower()
 
 
+def _executable_name(word: str) -> str:
+    name = _clean_word(word)
+    for suffix in (".exe", ".cmd", ".bat", ".com"):
+        if name.endswith(suffix):
+            return name[: -len(suffix)]
+    return name
+
+
 def _command_segments(words: list[str]) -> list[list[str]]:
     segments: list[list[str]] = [[]]
     for word in words:
-        if word in _COMMAND_SEPARATORS:
+        if word in _COMMAND_SEPARATORS or (
+            word and all(character in ";&|\n(){}" for character in word)
+        ):
             if segments[-1]:
                 segments.append([])
             continue
@@ -79,31 +116,29 @@ def _contains_release_action(words: list[str]) -> bool:
     return any(_segment_is_release(segment) for segment in _command_segments(words))
 
 
-def _segment_is_release(words: list[str]) -> bool:
-    if not words:
-        return False
-    normalized = [_clean_word(word) for word in words]
+def _comeback_subcommand(arguments: list[str]) -> str | None:
     index = 0
-
-    while index < len(normalized) and "=" in words[index] and not words[index].startswith("="):
-        index += 1
-    if index >= len(normalized):
-        return False
-
-    executable = normalized[index]
-    if executable in {"command", "exec", "sudo"}:
-        index += 1
-        while index < len(normalized) and words[index].startswith("-"):
+    while index < len(arguments):
+        argument = arguments[index].lower()
+        if argument in {"--db", "--repo"}:
+            if index + 1 >= len(arguments):
+                return None
+            index += 2
+            continue
+        if argument.startswith(("--db=", "--repo=")):
             index += 1
-        return _segment_is_release(words[index:])
-    if executable == "env":
-        index += 1
-        while index < len(normalized) and (
-            words[index].startswith("-") or "=" in words[index]
-        ):
-            index += 1
-        return _segment_is_release(words[index:])
-    if executable in _SHELLS:
+            continue
+        return argument if argument in {"checkpoint", "release"} else None
+    return None
+
+
+def _shell_payload(
+    executable: str,
+    words: list[str],
+    normalized: list[str],
+    index: int,
+) -> str | None:
+    if executable in _POSIX_SHELLS:
         command_option = next(
             (
                 option_index
@@ -118,13 +153,134 @@ def _segment_is_release(words: list[str]) -> bool:
             None,
         )
         if command_option is None or command_option + 1 >= len(words):
-            return False
-        command_index = command_option + 1
+            return None
+        # For POSIX shells only the next argv item is the -c program; later
+        # items become $0/$1 and must not be reinterpreted as commands.
+        return words[command_option + 1]
+    if executable in _WINDOWS_COMMAND_SHELLS:
+        command_option = next(
+            (
+                option_index
+                for option_index in range(index + 1, len(words))
+                if words[option_index].lower() in {"/c", "/k"}
+            ),
+            None,
+        )
+    else:
+        command_option = next(
+            (
+                option_index
+                for option_index in range(index + 1, len(words))
+                if words[option_index].lower()
+                in {"-c", "-command", "-commandwithargs"}
+            ),
+            None,
+        )
+    if command_option is None or command_option + 1 >= len(words):
+        return None
+    # cmd.exe and PowerShell consume the remaining command line.
+    return " ".join(words[command_option + 1 :])
+
+
+def _segment_comeback_action(words: list[str]) -> str | None:
+    if not words:
+        return None
+    normalized = [_clean_word(word) for word in words]
+    index = 0
+    while index < len(normalized) and "=" in words[index] and not words[index].startswith("="):
+        index += 1
+    while index < len(normalized) and normalized[index] in _CONTROL_PREFIXES:
+        index += 1
+    if index >= len(normalized):
+        return None
+    executable = _executable_name(words[index])
+    if executable in {"command", "exec", "sudo"}:
+        index += 1
+        while index < len(normalized) and words[index].startswith("-"):
+            index += 1
+        return _segment_comeback_action(words[index:])
+    if executable == "env":
+        index += 1
+        while index < len(normalized) and (
+            words[index].startswith("-") or "=" in words[index]
+        ):
+            index += 1
+        return _segment_comeback_action(words[index:])
+    if executable in _SHELLS:
+        payload = _shell_payload(executable, words, normalized, index)
+        if payload is None:
+            return None
         try:
-            return _contains_release_action(_shell_words(words[command_index]))
+            nested = _shell_words(payload)
+        except ValueError:
+            return None
+        nested_actions = {
+            action
+            for segment in _command_segments(nested)
+            if (action := _segment_comeback_action(segment)) is not None
+        }
+        return next(iter(nested_actions)) if len(nested_actions) == 1 else (
+            "multiple" if nested_actions else None
+        )
+    if executable in {"eval", "iex", "invoke-expression"} and index + 1 < len(words):
+        try:
+            nested = _shell_words(" ".join(words[index + 1 :]))
+        except ValueError:
+            return None
+        nested_actions = {
+            action
+            for segment in _command_segments(nested)
+            if (action := _segment_comeback_action(segment)) is not None
+        }
+        return next(iter(nested_actions)) if len(nested_actions) == 1 else (
+            "multiple" if nested_actions else None
+        )
+    raw_tail = words[index + 1 :]
+    tail = normalized[index + 1 :]
+    if executable == "comeback":
+        return _comeback_subcommand(raw_tail)
+    if executable == "py" or executable.startswith("python"):
+        for module_index, argument in enumerate(tail[:-1]):
+            if argument == "-m" and tail[module_index + 1] == "comeback.cli":
+                return _comeback_subcommand(raw_tail[module_index + 2 :])
+    return None
+
+
+def _segment_is_release(words: list[str]) -> bool:
+    if not words:
+        return False
+    normalized = [_clean_word(word) for word in words]
+    index = 0
+
+    while index < len(normalized) and "=" in words[index] and not words[index].startswith("="):
+        index += 1
+    while index < len(normalized) and normalized[index] in _CONTROL_PREFIXES:
+        index += 1
+    if index >= len(normalized):
+        return False
+
+    executable = _executable_name(words[index])
+    if executable in {"command", "exec", "sudo"}:
+        index += 1
+        while index < len(normalized) and words[index].startswith("-"):
+            index += 1
+        return _segment_is_release(words[index:])
+    if executable == "env":
+        index += 1
+        while index < len(normalized) and (
+            words[index].startswith("-") or "=" in words[index]
+        ):
+            index += 1
+        return _segment_is_release(words[index:])
+    if executable in _SHELLS:
+        payload = _shell_payload(executable, words, normalized, index)
+        if payload is None:
+            return False
+        try:
+            return _contains_release_action(_shell_words(payload))
         except ValueError:
             return False
-    if executable == "eval" and index + 1 < len(words):
+    if executable in {"eval", "iex", "invoke-expression"} and index + 1 < len(words):
         try:
             return _contains_release_action(_shell_words(" ".join(words[index + 1 :])))
         except ValueError:
@@ -147,9 +303,9 @@ def _segment_is_release(words: list[str]) -> bool:
             return True
     if executable == "forge" and tail[:1] == ["script"] and "--broadcast" in tail:
         return True
-    if executable in {"comeback", "comeback.exe"} and tail[:1] == ["release"]:
+    if _segment_comeback_action(words) == "release":
         return True
-    if executable.startswith("python") and tail:
+    if (executable == "py" or executable.startswith("python")) and tail:
         script = next((word for word in tail if not word.startswith("-")), "")
         return script in {"release_candidate.py", "release-candidate.py"}
     return executable in {"release_candidate.py", "release-candidate.py"}

@@ -1,44 +1,29 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from pathlib import Path
 
 import comeback.diagnostics as diagnostics
+from comeback.installer import hook_groups
 from comeback.memory import InterventionMemory
 
 
 def _write_hook(repo: Path) -> None:
     tools = repo.parent / "tools"
     tools.mkdir(exist_ok=True)
-    hook = tools / "comeback-hook"
-    capability = tools / "comeback"
+    hook = tools / ("comeback-hook.exe" if os.name == "nt" else "comeback-hook")
+    capability = tools / ("comeback.exe" if os.name == "nt" else "comeback")
     hook.write_text("hook\n", encoding="utf-8")
     capability.write_text("capability\n", encoding="utf-8")
-    hook.chmod(0o755)
-    capability.chmod(0o755)
-    command = f"{hook} --cli-executable {capability}"
+    if os.name != "nt":
+        hook.chmod(0o755)
+        capability.chmod(0o755)
     path = repo / ".codex" / "hooks.json"
     path.parent.mkdir(parents=True)
     path.write_text(
-        json.dumps(
-            {
-                "hooks": {
-                    "UserPromptSubmit": [
-                        {"hooks": [{"type": "command", "command": command}]}
-                    ],
-                    "PreToolUse": [
-                        {
-                            "matcher": "Bash",
-                            "hooks": [{"type": "command", "command": command}],
-                        }
-                    ],
-                    "Stop": [
-                        {"hooks": [{"type": "command", "command": command}]}
-                    ],
-                }
-            }
-        ),
+        json.dumps({"hooks": hook_groups(hook)}),
         encoding="utf-8",
     )
 

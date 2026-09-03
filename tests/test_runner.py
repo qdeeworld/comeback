@@ -5,6 +5,8 @@ import sys
 import time
 from pathlib import Path
 
+import pytest
+
 
 def _wait_for(path: Path, timeout: float = 10) -> None:
     deadline = time.monotonic() + timeout
@@ -102,7 +104,67 @@ def test_runner_rejects_wrong_start_token(tmp_path: Path):
             process.wait(timeout=10)
 
 
+def test_windows_job_settling_rechecks_a_transient_process_count(monkeypatch):
+    from comeback import runner
+
+    counts = iter([2, 2, 1])
+    monkeypatch.setattr(
+        runner,
+        "_windows_job_active_processes",
+        lambda _kernel32, _job: next(counts),
+    )
+    monkeypatch.setattr(runner, "_WINDOWS_JOB_SETTLE_INTERVAL_SECONDS", 0)
+
+    assert runner._wait_for_windows_job_to_settle(object(), object()) == 1
+
+
+def test_windows_job_settling_stops_at_its_deadline(monkeypatch):
+    from comeback import runner
+
+    monotonic_values = iter([10.0, 10.6])
+    monkeypatch.setattr(runner.time, "monotonic", lambda: next(monotonic_values))
+    monkeypatch.setattr(
+        runner,
+        "_windows_job_active_processes",
+        lambda _kernel32, _job: 2,
+    )
+
+    assert runner._wait_for_windows_job_to_settle(object(), object()) == 2
+
+
 if os.name == "nt":
+
+    def test_windows_runner_containment_failure_never_signals_readiness_or_starts_target(
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        from comeback import runner
+
+        ready = tmp_path / "runner.ready"
+        start = tmp_path / "runner.start"
+        marker = tmp_path / "target-ran.txt"
+        start.write_text("go\n", encoding="utf-8")
+
+        def fail_containment_setup():
+            raise OSError("simulated Job setup failure")
+
+        monkeypatch.setattr(runner, "_windows_containment_job", fail_containment_setup)
+
+        with pytest.raises(OSError, match="simulated Job setup failure"):
+            runner.run(
+                ready,
+                start,
+                "go",
+                [
+                    sys.executable,
+                    "-c",
+                    f"from pathlib import Path; Path({str(marker)!r}).write_text('ran')",
+                ],
+                wait_seconds=1,
+            )
+
+        assert not ready.exists()
+        assert not marker.exists()
 
     def test_windows_runner_marks_daemonizing_target_unknown(tmp_path: Path):
         ready = tmp_path / "runner.ready"

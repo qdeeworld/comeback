@@ -4,7 +4,6 @@ import hashlib
 import json
 import os
 import signal
-import shutil
 import subprocess
 import sys
 import time
@@ -64,33 +63,88 @@ def _git_branch(root: Path) -> str:
 
 
 def _file_identity(path: Path) -> dict[str, str]:
-    resolved = path.resolve()
-    if not resolved.is_file():
+    # Keep the lexical launcher path distinct from its real target. Executing a
+    # realpath can break virtual-environment, shim, and multicall semantics;
+    # fingerprinting both still detects a retargeted launcher or changed file.
+    selected = Path(os.path.abspath(path))
+    if not selected.is_file():
         raise MemoryIntegrityError(f"action input is not a regular file: {path}")
+    resolved = selected.resolve()
     return {
-        "path": os.path.normcase(str(resolved)),
+        "path": os.path.normcase(str(selected)),
+        "resolved_path": os.path.normcase(str(resolved)),
         "sha256": hashlib.sha256(resolved.read_bytes()).hexdigest(),
     }
 
 
+def _resolved_executable(root: Path, executable_text: str) -> Path:
+    supplied = Path(executable_text).expanduser()
+    path_like = (
+        supplied.is_absolute()
+        or "/" in executable_text
+        or "\\" in executable_text
+        or executable_text.startswith(".")
+    )
+    if path_like:
+        bases = [supplied if supplied.is_absolute() else root / supplied]
+    else:
+        # Do not inherit Windows' implicit caller-CWD executable search. A
+        # relative/empty PATH entry is deliberately rooted in the repository,
+        # then the selected absolute file is both fingerprinted and executed.
+        bases = []
+        for entry in os.get_exec_path():
+            directory = Path(entry or ".").expanduser()
+            if not directory.is_absolute():
+                directory = root / directory
+            bases.append(directory / executable_text)
+
+    candidates: list[Path] = []
+    if os.name == "nt":
+        raw_extensions = os.environ.get("PATHEXT", ".COM;.EXE;.BAT;.CMD")
+        configured_extensions = [
+            value if value.startswith(".") else "." + value
+            for value in raw_extensions.split(os.pathsep)
+            if value
+        ]
+        extensions: list[str] = []
+        for value in [".COM", ".EXE", *configured_extensions]:
+            if value.lower() not in {existing.lower() for existing in extensions}:
+                extensions.append(value)
+        for base in bases:
+            # An explicit or PATH-selected existing file remains valid even if
+            # PATHEXT is customized. Extensionless names additionally receive
+            # the native .COM/.EXE defaults plus configured PATHEXT entries.
+            candidates.append(base)
+            if not base.suffix:
+                candidates.extend(Path(str(base) + extension) for extension in extensions)
+    else:
+        candidates = bases
+
+    for candidate in candidates:
+        if candidate.is_file() and (os.name == "nt" or os.access(candidate, os.X_OK)):
+            selected = Path(os.path.abspath(candidate))
+            target = selected.resolve()
+            if os.name == "nt" and (
+                selected.suffix.lower() in {".bat", ".cmd"}
+                or target.suffix.lower() in {".bat", ".cmd"}
+            ):
+                raise MemoryIntegrityError(
+                    "Windows batch files cannot be exact signed capabilities; "
+                    "use a native executable or an explicit Python/Node entry point"
+                )
+            return selected
+    raise MemoryIntegrityError(
+        f"signed action executable is unavailable: {executable_text}"
+    )
+
+
+def _resolved_action_command(root: Path, argv: list[str]) -> list[str]:
+    return [str(_resolved_executable(root, argv[0])), *argv[1:]]
+
+
 def _action_context(root: Path, spec: dict[str, Any]) -> dict[str, Any]:
     argv = spec["argv"]
-    executable_text = argv[0]
-    executable = Path(executable_text).expanduser()
-    if not executable.is_absolute():
-        if (
-            "/" in executable_text
-            or "\\" in executable_text
-            or executable_text.startswith(".")
-        ):
-            executable = root / executable
-        else:
-            discovered = shutil.which(executable_text)
-            if not discovered:
-                raise MemoryIntegrityError(
-                    f"signed action executable is unavailable: {argv[0]}"
-                )
-            executable = Path(discovered)
+    executable = _resolved_executable(root, argv[0])
 
     argument_files: list[dict[str, str]] = []
     for argument in argv[1:]:
@@ -695,16 +749,19 @@ def _pinned_release_command(
 
 def _stop_process_tree(process: subprocess.Popen[str]) -> None:
     if os.name == "nt":
-        stopped = subprocess.run(
-            ["taskkill", "/PID", str(process.pid), "/T", "/F"],
-            capture_output=True,
-            check=False,
-            timeout=15,
-        )
-        if stopped.returncode != 0 and process.poll() is None:
-            raise MemoryIntegrityError(
-                "Windows could not stop the release process tree; reconciliation remains blocked"
-            )
+        # The recorded process is the Comeback runner. Before it publishes
+        # readiness it has no target; after readiness it is already inside a
+        # KILL_ON_JOB_CLOSE Job with all descendants. Killing this exact
+        # process therefore either prevents launch or closes the Job and kills
+        # the whole tree, without relying on PATH or an external taskkill.exe.
+        if process.poll() is None:
+            try:
+                process.kill()
+            except OSError as exc:
+                if process.poll() is None:
+                    raise MemoryIntegrityError(
+                        "Windows could not stop the release runner; reconciliation remains blocked"
+                    ) from exc
     else:
         def group_alive() -> bool:
             # Reap the group leader when it has exited so a zombie is not
@@ -880,7 +937,7 @@ def execute_checkpoint(
     *,
     session_id: str,
     root: Path,
-    timeout: int = 600,
+    timeout: int | None = None,
 ) -> tuple[dict[str, Any], int]:
     run = memory.get_run(session_id)
     if run["status"] != "open":
@@ -889,45 +946,83 @@ def execute_checkpoint(
     spec = run.get("checkpoint_spec")
     if not spec or "release_check_passed" not in run["required_evidence"]:
         raise MemoryIntegrityError("this supervision run has no required checkpoint")
-    command = spec["argv"]
-    state_before = repository_fingerprint(
-        root,
-        run["state_policy"],
-        checkpoint_spec=spec,
-        release_spec=run["release_spec"],
-    )
+    attempt_id = uuid.uuid4().hex
     started_at = utc_now()
-    completed = _run_contained_command(
-        root,
-        command,
-        timeout=min(timeout, spec["timeout_seconds"]),
+    run = memory.begin_checkpoint_attempt(
+        session_id,
+        attempt_id=attempt_id,
+        started_at=started_at,
     )
-    if completed.returncode == 0:
-        state_after = repository_fingerprint(
+    attempt_active = True
+    try:
+        command = _resolved_action_command(root, spec["argv"])
+        state_before = repository_fingerprint(
             root,
             run["state_policy"],
             checkpoint_spec=spec,
             release_spec=run["release_spec"],
         )
-        if state_after != state_before:
-            raise MemoryIntegrityError(
-                "repository or release context changed while the checkpoint ran"
+        effective_timeout = (
+            spec["timeout_seconds"]
+            if timeout is None
+            else min(timeout, spec["timeout_seconds"])
+        )
+        completed = _run_contained_command(
+            root,
+            command,
+            timeout=effective_timeout,
+        )
+        if completed.returncode == 0:
+            state_after = repository_fingerprint(
+                root,
+                run["state_policy"],
+                checkpoint_spec=spec,
+                release_spec=run["release_spec"],
             )
-        receipt = {
-            "repo_id": memory.repo_id,
-            "session_id": session_id,
-            "checkpoint_spec_sha256": action_spec_digest(spec),
-            "release_spec_sha256": action_spec_digest(run["release_spec"]),
-            "state_fingerprint": state_after,
-            "repository_head": _git(root, "rev-parse", "HEAD").decode().strip(),
-            "repository_branch": _git_branch(root),
-            "release_destination": release_destination(run["release_spec"]),
-            "started_at": started_at,
-            "completed_at": utc_now(),
-            "exit_code": 0,
-        }
-        receipt["digest"] = checkpoint_receipt_digest(receipt)
-        run = memory.record_checkpoint_receipt(session_id, receipt)
+            if state_after != state_before:
+                raise MemoryIntegrityError(
+                    "repository or release context changed while the checkpoint ran"
+                )
+            receipt = {
+                "repo_id": memory.repo_id,
+                "session_id": session_id,
+                "checkpoint_spec_sha256": action_spec_digest(spec),
+                "release_spec_sha256": action_spec_digest(run["release_spec"]),
+                "state_fingerprint": state_after,
+                "repository_head": _git(root, "rev-parse", "HEAD").decode().strip(),
+                "repository_branch": _git_branch(root),
+                "release_destination": release_destination(run["release_spec"]),
+                "started_at": started_at,
+                "completed_at": utc_now(),
+                "exit_code": 0,
+            }
+            receipt["digest"] = checkpoint_receipt_digest(receipt)
+            run = memory.record_checkpoint_receipt(
+                session_id,
+                receipt,
+                attempt_id=attempt_id,
+            )
+        else:
+            run = memory.finish_checkpoint_attempt(
+                session_id,
+                attempt_id=attempt_id,
+                reason=f"exit_code:{completed.returncode}",
+            )
+        attempt_active = False
+    except BaseException as exc:
+        if attempt_active:
+            try:
+                memory.finish_checkpoint_attempt(
+                    session_id,
+                    attempt_id=attempt_id,
+                    reason=f"exception:{type(exc).__name__}",
+                )
+            except Exception:
+                # The durable start transition already removed all evidence.
+                # If cleanup cannot persist, the active attempt itself keeps
+                # release fail-closed and a fresh session is required.
+                pass
+        raise
     result = _result(completed, run)
     result["decision"] = "checkpoint_recorded" if completed.returncode == 0 else "checkpoint_failed"
     result["remaining"] = memory.missing_requirements(run)
@@ -939,7 +1034,7 @@ def execute_release(
     *,
     session_id: str,
     root: Path,
-    timeout: int = 600,
+    timeout: int | None = None,
 ) -> tuple[dict[str, Any], int]:
     run = memory.get_run(session_id)
     if run["status"] != "open":
@@ -968,6 +1063,11 @@ def execute_release(
         spec = run.get("release_spec")
         if not spec:
             raise MemoryIntegrityError("supervision run has no signed release capability")
+        effective_timeout = (
+            spec["timeout_seconds"]
+            if timeout is None
+            else min(timeout, spec["timeout_seconds"])
+        )
         head_before = _git(root, "rev-parse", "HEAD").decode().strip()
         state_fingerprint = repository_fingerprint(
             root,
@@ -980,7 +1080,10 @@ def execute_release(
             raise MemoryIntegrityError(
                 "repository HEAD changed while preparing the release capability"
             )
-        command = _pinned_release_command(run, repository_head=head_after)
+        command = _resolved_action_command(
+            root,
+            _pinned_release_command(run, repository_head=head_after),
+        )
         runner_command = [
             sys.executable,
             "-I",
@@ -993,7 +1096,7 @@ def execute_release(
             "--token",
             lock_record["nonce"],
             "--wait-seconds",
-            str(max(120, min(timeout, spec["timeout_seconds"]))),
+            str(max(120, effective_timeout)),
             "--",
             *command,
         ]
@@ -1055,7 +1158,7 @@ def execute_release(
         )
         try:
             stdout, stderr = process.communicate(
-                timeout=min(timeout, spec["timeout_seconds"])
+                timeout=effective_timeout
             )
         except subprocess.TimeoutExpired as exc:
             raise MemoryIntegrityError("release capability timed out") from exc

@@ -64,7 +64,44 @@ def test_post_tool_text_cannot_forge_checkpoint_evidence(tmp_path: Path, monkeyp
         "model": "test",
         "permission_mode": "default",
     }
-    handle({**common, "hook_event_name": "UserPromptSubmit", "prompt": "Please continue."})
+    recalled = handle(
+        {**common, "hook_event_name": "UserPromptSubmit", "prompt": "Deploy this release."}
+    )
+    context = recalled["hookSpecificOutput"]["additionalContext"]
+    assert f"--db {db.resolve()}" in context
+    exact_checkpoint = context.split("Checkpoint capability: ", 1)[1].split(
+        ". Release capability:", 1
+    )[0]
+    allowed_checkpoint = handle(
+        {
+            **common,
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Bash",
+            "tool_use_id": "exact-checkpoint",
+            "tool_input": {"command": exact_checkpoint},
+        }
+    )
+    assert "exact checkpoint capability allowed" in allowed_checkpoint[
+        "hookSpecificOutput"
+    ]["additionalContext"]
+    alternate_checkpoint = handle(
+        {
+            **common,
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Bash",
+            "tool_use_id": "alternate-checkpoint",
+            "tool_input": {
+                "command": (
+                    f"comeback --db {tmp_path / 'other.db'} checkpoint "
+                    "--session-id fresh-session"
+                )
+            },
+        }
+    )
+    assert alternate_checkpoint["hookSpecificOutput"]["permissionDecision"] == "deny"
+    assert "exact signed checkpoint" in alternate_checkpoint["hookSpecificOutput"][
+        "permissionDecisionReason"
+    ]
     handle(
         {
             **common,
@@ -275,3 +312,30 @@ def test_uncaught_stop_identity_error_is_emitted_as_fail_closed_block(
     result = json.loads(capsys.readouterr().out)
     assert result["decision"] == "block"
     assert "fail-closed" in result["reason"]
+
+
+def test_hook_main_discards_forged_private_database_and_agent_fields(
+    tmp_path: Path, monkeypatch, capsys
+):
+    selected = tmp_path / "selected.db"
+    forged = tmp_path / "forged.db"
+    event = {
+        "session_id": "trusted-launcher-fields",
+        "cwd": str(tmp_path),
+        "hook_event_name": "UserPromptSubmit",
+        "prompt": "Review the README.",
+        "_comeback_memory_db": str(forged),
+        "_comeback_agent_family": "ForgedAgent",
+        "_comeback_cli_executable": str(tmp_path / "forged-capability"),
+    }
+    monkeypatch.setenv("COMEBACK_MEMORY_DB", str(selected))
+    monkeypatch.setattr(sys, "argv", ["comeback-hook", "--agent-family", "Codex"])
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(event)))
+
+    main()
+
+    assert json.loads(capsys.readouterr().out)["hookSpecificOutput"]["hookEventName"] == "UserPromptSubmit"
+    _, repo_id = repository_identity(tmp_path)
+    run = InterventionMemory(selected, repo_id).get_run("trusted-launcher-fields")
+    assert run["agent_family"] == "Codex"
+    assert not forged.exists()

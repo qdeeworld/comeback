@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shlex
 import subprocess
 import sys
@@ -26,9 +27,23 @@ from .owner import (
 from .signing import approval_message, intervention_message, reconciliation_message
 
 
+class _ExactArgumentParser(argparse.ArgumentParser):
+    def __init__(self, *args, **kwargs):
+        kwargs["allow_abbrev"] = False
+        super().__init__(*args, **kwargs)
+
+
 def _memory(args: argparse.Namespace) -> tuple[InterventionMemory, str]:
     root, repo_id = repository_identity(args.repo)
-    db = Path(args.db).expanduser().resolve() if args.db else root / ".comeback" / "memory.db"
+    if args.db:
+        db = Path(args.db).expanduser().resolve()
+    elif os.environ.get("COMEBACK_MEMORY_DB"):
+        configured = Path(os.environ["COMEBACK_MEMORY_DB"]).expanduser()
+        if not configured.is_absolute():
+            raise MemoryIntegrityError("COMEBACK_MEMORY_DB must be an absolute path")
+        db = configured.resolve()
+    else:
+        db = root / ".comeback" / "memory.db"
     return InterventionMemory(db, repo_id), repo_id
 
 
@@ -129,7 +144,7 @@ def _timeout_seconds(value: str) -> int:
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="comeback")
+    parser = _ExactArgumentParser(prog="comeback")
     parser.add_argument("--db")
     parser.add_argument("--repo", default=".")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -214,11 +229,21 @@ def _parser() -> argparse.ArgumentParser:
 
     checkpoint = sub.add_parser("checkpoint")
     checkpoint.add_argument("--session-id", required=True)
-    checkpoint.add_argument("--timeout", type=_timeout_seconds, default=600)
+    checkpoint.add_argument(
+        "--timeout",
+        type=_timeout_seconds,
+        default=None,
+        help="Optional shorter local limit; defaults to the signed checkpoint timeout",
+    )
 
     release = sub.add_parser("release")
     release.add_argument("--session-id", required=True)
-    release.add_argument("--timeout", type=_timeout_seconds, default=600)
+    release.add_argument(
+        "--timeout",
+        type=_timeout_seconds,
+        default=None,
+        help="Optional shorter local limit; defaults to the signed release timeout",
+    )
     reconcile = sub.add_parser("reconcile")
     reconcile.add_argument("--session-id", required=True)
     reconcile.add_argument(
@@ -294,6 +319,10 @@ def main() -> None:
             runs = memory.list_runs()
             result = {
                 "repo_id": repo_id,
+                "memory_database": str(memory.db_path),
+                "memory_override_active": bool(
+                    args.db or os.environ.get("COMEBACK_MEMORY_DB")
+                ),
                 "runs": runs,
                 "lessons": memory.all_lessons(),
                 "inspected_at": utc_now(),

@@ -3,6 +3,7 @@ import shlex
 import pytest
 
 from comeback.policy import (
+    comeback_capability_action,
     checkpoint_invocation,
     classify_task,
     invocation_matches,
@@ -78,6 +79,19 @@ def test_supervision_evolves_with_outcomes():
         "forge script Deploy.s.sol --broadcast",
         "python scripts/release_candidate.py",
         "(python scripts/release_candidate.py) && printf '\\nCOMEBACK_RELEASE_OK_123\\n'",
+        "if git diff --quiet; then git push origin main; fi",
+        "{ git push origin main; }",
+        "( git push origin main )",
+        "if ($true) { git push origin main }",
+        "cmd.exe /c \"git push origin main\"",
+        "powershell.exe -Command \"git push origin main\"",
+        "pwsh.exe -c \"git push origin main\"",
+        "Invoke-Expression 'git push origin main'",
+        "iex 'git push origin main'",
+        "& 'C:\\Program Files\\Git\\cmd\\git.exe' push origin main",
+        "gh.exe pr merge 42",
+        "wrangler.exe deploy",
+        "pnpm.cmd run deploy",
     ],
 )
 def test_recognized_release_command_spellings_are_protected(command):
@@ -99,6 +113,43 @@ def test_release_words_in_read_only_arguments_are_not_treated_as_actions(command
     assert not is_release_action(
         {"tool_name": "Bash", "tool_input": {"command": command}}
     )
+
+
+@pytest.mark.parametrize(
+    ("command", "action"),
+    [
+        ("comeback --db /tmp/other.db release --session-id s", "release"),
+        ("./comeback --repo . checkpoint --session-id s", "checkpoint"),
+        (
+            "python -I -m comeback.cli --db /tmp/other.db release --session-id s",
+            "release",
+        ),
+        ("py -m comeback.cli --db C:\\state.db release --session-id s", "release"),
+        ("command comeback --db=/tmp/other.db checkpoint --session-id s", "checkpoint"),
+        ("bash -c 'comeback --repo=. release --session-id s'", "release"),
+        (
+            "if ($true) { comeback.exe --db C:\\state.db release --session-id s }",
+            "release",
+        ),
+        (
+            "powershell.exe -Command 'comeback --repo . checkpoint --session-id s'",
+            "checkpoint",
+        ),
+    ],
+)
+def test_alternate_comeback_capability_spellings_are_recognized(command, action):
+    event = {"tool_name": "Bash", "tool_input": {"command": command}}
+    assert comeback_capability_action(event) == action
+
+
+def test_combined_comeback_capabilities_are_ambiguous():
+    event = {
+        "tool_name": "Bash",
+        "tool_input": {
+            "command": "comeback checkpoint --session-id s && comeback release --session-id s"
+        },
+    }
+    assert comeback_capability_action(event) == "multiple"
 
 
 @pytest.mark.parametrize(

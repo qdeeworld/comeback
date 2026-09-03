@@ -137,6 +137,11 @@ def _action_spec(value: Any, field: str) -> dict[str, Any]:
         "powershell.exe", "pwsh", "pwsh.exe", "sh", "sh.exe", "zsh",
     }:
         raise MemoryIntegrityError(f"{field} cannot invoke a shell interpreter")
+    if executable.endswith((".bat", ".cmd")):
+        raise MemoryIntegrityError(
+            f"{field} cannot invoke a Windows batch file; use a native executable "
+            "or an explicit Python/Node entry point"
+        )
     if field == "release_spec" and executable in {"git", "git.exe"}:
         if len(argv) != 4 or argv[1] != "push":
             raise MemoryIntegrityError(
@@ -468,6 +473,28 @@ def validate_run(body: Any) -> dict[str, Any]:
     has_checkpoint = "release_check_passed" in run["satisfied_evidence"]
     if has_checkpoint != isinstance(receipt, dict):
         raise MemoryIntegrityError("run checkpoint evidence and receipt disagree")
+    checkpoint_attempt = run.get("checkpoint_attempt")
+    if checkpoint_attempt is not None:
+        if (
+            not isinstance(checkpoint_attempt, dict)
+            or set(checkpoint_attempt) != {"attempt_id", "started_at"}
+            or not isinstance(checkpoint_attempt.get("attempt_id"), str)
+            or not checkpoint_attempt["attempt_id"]
+        ):
+            raise MemoryIntegrityError("run checkpoint attempt is invalid")
+        try:
+            attempt_started = datetime.fromisoformat(checkpoint_attempt["started_at"])
+        except (TypeError, ValueError) as exc:
+            raise MemoryIntegrityError("run checkpoint attempt timestamp is invalid") from exc
+        if attempt_started.tzinfo is None:
+            raise MemoryIntegrityError("run checkpoint attempt timestamp is invalid")
+        if run["status"] != "open":
+            raise MemoryIntegrityError("closed run contains an active checkpoint attempt")
+        if receipt is not None or has_checkpoint:
+            raise MemoryIntegrityError(
+                "active checkpoint attempt cannot retain earlier checkpoint evidence"
+            )
+    run["checkpoint_attempt"] = deepcopy(checkpoint_attempt)
     approval = run.get("approval")
     has_approval = "human_approval" in run["satisfied_evidence"]
     if has_approval:
@@ -831,25 +858,30 @@ class InterventionMemory:
             incident_body,
             status="recorded",
         )
-        self.client.write_event(
-            evaluated={
-                "repo_id": self.repo_id,
-                "task_class": validated["task_class"],
-                "source_session_id": validated["source_session_id"],
-                "incident_id": incident_id,
-            },
-            acted={
-                "event": "human_intervention",
-                "lesson_id": lesson_id,
-                "signed_fields": deepcopy(signed_fields),
-                "intervention_signature": signature,
-                "incident_summary": incident_summary,
-            },
-            forward={
-                "mode": validated["current_mode"],
-                "revision": validated["revision"],
-            },
-        )
+        try:
+            self.client.write_event(
+                evaluated={
+                    "repo_id": self.repo_id,
+                    "task_class": validated["task_class"],
+                    "source_session_id": validated["source_session_id"],
+                    "incident_id": incident_id,
+                },
+                acted={
+                    "event": "human_intervention",
+                    "lesson_id": lesson_id,
+                    "signed_fields": deepcopy(signed_fields),
+                    "intervention_signature": signature,
+                    "incident_summary": incident_summary,
+                },
+                forward={
+                    "mode": validated["current_mode"],
+                    "revision": validated["revision"],
+                },
+            )
+        except Exception:
+            # Entity projections are authoritative. A secondary journal
+            # outage must not make a committed intervention look rejected.
+            pass
         return validated
 
     def matching_lessons(self, task_class: str, area: str, agent_family: str) -> list[dict[str, Any]]:
@@ -984,6 +1016,7 @@ class InterventionMemory:
             "release_spec": deepcopy(next(iter(release_specs.values()), None)),
             "state_policy": deepcopy(next(iter(state_policies.values()), None)),
             "checkpoint_receipt": None,
+            "checkpoint_attempt": None,
             "required_evidence": requirements_for_mode(mode),
             "satisfied_evidence": [],
             "status": "open",
@@ -991,11 +1024,14 @@ class InterventionMemory:
             "updated_at": utc_now(),
         }
         self.client.set_entity(self.RUN_CATEGORY, session_id, run, status="open")
-        self.client.write_event(
-            evaluated={"session_id": session_id, "task_class": task_class, "lesson_ids": run["lesson_ids"]},
-            acted={"event": "supervision_selected", "mode": mode},
-            forward={"required_evidence": run["required_evidence"]},
-        )
+        try:
+            self.client.write_event(
+                evaluated={"session_id": session_id, "task_class": task_class, "lesson_ids": run["lesson_ids"]},
+                acted={"event": "supervision_selected", "mode": mode},
+                forward={"required_evidence": run["required_evidence"]},
+            )
+        except Exception:
+            pass
         return run
 
     def get_run(self, session_id: str) -> dict[str, Any]:
@@ -1078,33 +1114,105 @@ class InterventionMemory:
         return sorted(runs, key=lambda run: run.get("updated_at", ""), reverse=True)
 
     @_serialized_mutation
-    def record_checkpoint_receipt(
-        self, session_id: str, receipt: dict[str, Any]
+    def begin_checkpoint_attempt(
+        self, session_id: str, *, attempt_id: str, started_at: str
     ) -> dict[str, Any]:
         run = self.get_verified_run(session_id)
         if run["status"] != "open":
             raise MemoryIntegrityError("supervision run is not open")
+        if run.get("checkpoint_attempt") is not None:
+            raise MemoryIntegrityError(
+                "another checkpoint attempt is active; start a fresh supervision session "
+                "if its process was interrupted"
+            )
+        if not isinstance(attempt_id, str) or not attempt_id:
+            raise MemoryIntegrityError("checkpoint attempt ID is invalid")
+        try:
+            started = datetime.fromisoformat(started_at)
+        except ValueError as exc:
+            raise MemoryIntegrityError("checkpoint attempt timestamp is invalid") from exc
+        if started.tzinfo is None or started > datetime.now(timezone.utc) + _CLOCK_SKEW:
+            raise MemoryIntegrityError("checkpoint attempt timestamp is invalid")
+        run["checkpoint_receipt"] = None
+        run["satisfied_evidence"] = [
+            item
+            for item in run["satisfied_evidence"]
+            if item not in {"release_check_passed", "human_approval"}
+        ]
+        run.pop("approval", None)
+        run["checkpoint_attempt"] = {
+            "attempt_id": attempt_id,
+            "started_at": started_at,
+        }
+        run["updated_at"] = utc_now()
+        self.client.set_entity(self.RUN_CATEGORY, session_id, run, status="open")
+        try:
+            self.client.write_event(
+                evaluated={"session_id": session_id, "attempt_id": attempt_id},
+                acted={"event": "checkpoint_started"},
+                forward={"remaining": self.missing_requirements(run)},
+            )
+        except Exception:
+            # The entity transition is the safety boundary. A journal outage
+            # must not restore stale checkpoint evidence or start the command
+            # without its durable invalidation.
+            pass
+        return run
+
+    @_serialized_mutation
+    def finish_checkpoint_attempt(
+        self, session_id: str, *, attempt_id: str, reason: str
+    ) -> dict[str, Any]:
+        run = self.get_verified_run(session_id)
+        attempt = run.get("checkpoint_attempt")
+        if not isinstance(attempt, dict) or attempt.get("attempt_id") != attempt_id:
+            raise MemoryIntegrityError("checkpoint attempt identity is stale or missing")
+        run["checkpoint_attempt"] = None
+        run["checkpoint_receipt"] = None
+        run["satisfied_evidence"] = [
+            item
+            for item in run["satisfied_evidence"]
+            if item not in {"release_check_passed", "human_approval"}
+        ]
+        run.pop("approval", None)
+        run["updated_at"] = utc_now()
+        self.client.set_entity(self.RUN_CATEGORY, session_id, run, status="open")
+        try:
+            self.client.write_event(
+                evaluated={"session_id": session_id, "attempt_id": attempt_id},
+                acted={"event": "checkpoint_not_passed", "reason": reason},
+                forward={"remaining": self.missing_requirements(run)},
+            )
+        except Exception:
+            pass
+        return run
+
+    @_serialized_mutation
+    def record_checkpoint_receipt(
+        self, session_id: str, receipt: dict[str, Any], *, attempt_id: str
+    ) -> dict[str, Any]:
+        run = self.get_verified_run(session_id)
+        if run["status"] != "open":
+            raise MemoryIntegrityError("supervision run is not open")
+        attempt = run.get("checkpoint_attempt")
+        if not isinstance(attempt, dict) or attempt.get("attempt_id") != attempt_id:
+            raise MemoryIntegrityError("checkpoint receipt belongs to a stale attempt")
         receipt = _checkpoint_receipt(receipt, run)
-        prior_receipt = run.get("checkpoint_receipt")
-        if (
-            isinstance(prior_receipt, dict)
-            and prior_receipt.get("digest") != receipt["digest"]
-        ):
-            run["satisfied_evidence"] = [
-                item for item in run["satisfied_evidence"] if item != "human_approval"
-            ]
-            run.pop("approval", None)
+        run["checkpoint_attempt"] = None
         run["checkpoint_receipt"] = deepcopy(receipt)
         if "release_check_passed" not in run["satisfied_evidence"]:
             run["satisfied_evidence"].append("release_check_passed")
         run["satisfied_evidence"].sort()
         run["updated_at"] = utc_now()
         self.client.set_entity(self.RUN_CATEGORY, session_id, run, status="open")
-        self.client.write_event(
-            evaluated={"session_id": session_id, "receipt": receipt["digest"]},
-            acted={"event": "checkpoint_passed", "exit_code": 0},
-            forward={"remaining": self.missing_requirements(run)},
-        )
+        try:
+            self.client.write_event(
+                evaluated={"session_id": session_id, "receipt": receipt["digest"]},
+                acted={"event": "checkpoint_passed", "exit_code": 0},
+                forward={"remaining": self.missing_requirements(run)},
+            )
+        except Exception:
+            pass
         return run
 
     @_serialized_mutation
@@ -1145,11 +1253,16 @@ class InterventionMemory:
         run["satisfied_evidence"].sort()
         run["updated_at"] = utc_now()
         self.client.set_entity(self.RUN_CATEGORY, session_id, run, status="open")
-        self.client.write_event(
-            evaluated={"session_id": session_id, "lesson_ids": run["lesson_ids"]},
-            acted={"event": "human_approval", "signer": recovered},
-            forward={"remaining": self.missing_requirements(run)},
-        )
+        try:
+            self.client.write_event(
+                evaluated={"session_id": session_id, "lesson_ids": run["lesson_ids"]},
+                acted={"event": "human_approval", "signer": recovered},
+                forward={"remaining": self.missing_requirements(run)},
+            )
+        except Exception:
+            # The signed run entity is authoritative. Reporting a failure after
+            # it commits would mislead the approving operator.
+            pass
         return run
 
     @_serialized_mutation
@@ -1249,11 +1362,14 @@ class InterventionMemory:
         run["outcome"] = "success" if success else "failure"
         run["updated_at"] = utc_now()
         self.client.set_entity(self.RUN_CATEGORY, session_id, run, status=run["status"])
-        self.client.write_event(
-            evaluated={"session_id": session_id, "mode": run["mode"]},
-            acted={"event": "release_outcome", "success": success},
-            forward={"lesson_ids": run["lesson_ids"]},
-        )
+        try:
+            self.client.write_event(
+                evaluated={"session_id": session_id, "mode": run["mode"]},
+                acted={"event": "release_outcome", "success": success},
+                forward={"lesson_ids": run["lesson_ids"]},
+            )
+        except Exception:
+            pass
         return run
 
     @_serialized_mutation
@@ -1297,11 +1413,14 @@ class InterventionMemory:
         run["outcome_reason"] = reason
         run["updated_at"] = utc_now()
         self.client.set_entity(self.RUN_CATEGORY, session_id, run, status="unknown")
-        self.client.write_event(
-            evaluated={"session_id": session_id, "mode": run["mode"]},
-            acted={"event": "release_outcome_unknown", "reason": reason},
-            forward={"lesson_ids": run["lesson_ids"]},
-        )
+        try:
+            self.client.write_event(
+                evaluated={"session_id": session_id, "mode": run["mode"]},
+                acted={"event": "release_outcome_unknown", "reason": reason},
+                forward={"lesson_ids": run["lesson_ids"]},
+            )
+        except Exception:
+            pass
         return run
 
     @_serialized_mutation

@@ -16,6 +16,7 @@ from comeback.execution import (
     _open_start_barrier,
     _process_birth_token,
     _required_process_birth_token,
+    _resolved_executable,
     _release_lock,
     execute_checkpoint,
     execute_release,
@@ -23,6 +24,7 @@ from comeback.execution import (
     reconcile_release,
     release_lock_path,
 )
+import comeback.execution as execution_module
 import comeback.memory as memory_module
 from comeback.memory import InterventionMemory, MemoryIntegrityError, release_destination
 from comeback.signing import (
@@ -39,6 +41,7 @@ def _supervised_memory(
     *,
     checkpoint_exit: int = 0,
     checkpoint_argv: list[str] | None = None,
+    checkpoint_timeout: int = 60,
     require_clean_git: bool = True,
     release_argv: list[str] | None = None,
 ) -> tuple[InterventionMemory, object]:
@@ -69,7 +72,10 @@ def _supervised_memory(
         "agent_scope": "all_supported",
         "severity": "release_blocker",
         "action_schema": 2,
-        "checkpoint_spec": {"argv": checkpoint, "timeout_seconds": 60},
+        "checkpoint_spec": {
+            "argv": checkpoint,
+            "timeout_seconds": checkpoint_timeout,
+        },
         "release_spec": {"argv": release, "timeout_seconds": 60},
         "state_policy": {
             "bind_head": True,
@@ -144,6 +150,63 @@ def test_macos_process_birth_token_does_not_spawn_ps(monkeypatch):
     assert token.startswith("darwin-starttime:")
 
 
+def test_unqualified_executable_is_resolved_against_action_repository(
+    tmp_path: Path, monkeypatch
+):
+    repository = tmp_path / "repository"
+    caller = tmp_path / "caller"
+    repository.mkdir()
+    caller.mkdir()
+    name = "release-tool.exe" if os.name == "nt" else "release-tool"
+    repository_tool = repository / name
+    caller_tool = caller / name
+    repository_tool.write_bytes(b"repository")
+    caller_tool.write_bytes(b"caller")
+    if os.name != "nt":
+        repository_tool.chmod(0o755)
+        caller_tool.chmod(0o755)
+    monkeypatch.chdir(caller)
+    monkeypatch.setattr(os, "get_exec_path", lambda *_args, **_kwargs: ["."])
+
+    assert _resolved_executable(repository, name) == Path(
+        os.path.abspath(repository_tool)
+    )
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX symlink launcher semantics")
+def test_resolved_executable_preserves_symlink_launcher_path(tmp_path: Path):
+    launcher = tmp_path / "python-in-venv"
+    launcher.symlink_to(Path(sys.executable))
+
+    selected = _resolved_executable(tmp_path, str(launcher))
+
+    assert selected == Path(os.path.abspath(launcher))
+    assert selected != launcher.resolve()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows batch dispatch semantics")
+def test_windows_unqualified_batch_executable_is_rejected(tmp_path: Path, monkeypatch):
+    batch = tmp_path / "deploy.cmd"
+    batch.write_text("@echo off\r\nexit /b 0\r\n", encoding="utf-8")
+    monkeypatch.setenv("PATHEXT", ".EXE;.CMD;.BAT")
+    monkeypatch.setattr(os, "get_exec_path", lambda *_args, **_kwargs: [str(tmp_path)])
+
+    with pytest.raises(MemoryIntegrityError, match="batch files"):
+        _resolved_executable(tmp_path, "deploy")
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows PATHEXT semantics")
+def test_windows_native_executable_survives_truncated_pathext(tmp_path: Path, monkeypatch):
+    executable = tmp_path / "release-tool.exe"
+    executable.write_bytes(b"fixture")
+    monkeypatch.setenv("PATHEXT", ".CPL")
+    monkeypatch.setattr(os, "get_exec_path", lambda *_args, **_kwargs: [str(tmp_path)])
+
+    expected = Path(os.path.abspath(executable))
+    assert _resolved_executable(tmp_path, str(executable)) == expected
+    assert _resolved_executable(tmp_path, "release-tool") == expected
+
+
 def test_cross_platform_checkpoint_and_release_capabilities(tmp_path: Path):
     memory, owner = _supervised_memory(tmp_path)
     checkpoint, checkpoint_exit = execute_checkpoint(
@@ -206,6 +269,25 @@ def test_failed_checkpoint_never_records_evidence(tmp_path: Path):
     assert "release_check_passed" not in memory.get_run("fresh")["satisfied_evidence"]
 
 
+def test_checkpoint_defaults_to_signed_timeout_above_ten_minutes(
+    tmp_path: Path, monkeypatch
+):
+    memory, _ = _supervised_memory(tmp_path, checkpoint_timeout=1200)
+    observed: list[int] = []
+
+    def fake_run(_root, command, *, timeout):
+        observed.append(timeout)
+        return subprocess.CompletedProcess(command, 0, "passed\n", "")
+
+    monkeypatch.setattr(execution_module, "_run_contained_command", fake_run)
+
+    result, exit_code = execute_checkpoint(memory, session_id="fresh", root=tmp_path)
+
+    assert exit_code == 0
+    assert result["decision"] == "checkpoint_recorded"
+    assert observed == [1200]
+
+
 @pytest.mark.skipif(os.name == "nt", reason="POSIX process-group behavior")
 def test_checkpoint_never_mints_receipt_while_descendant_survives(tmp_path: Path):
     marker = tmp_path / "late-checkpoint-child.txt"
@@ -257,9 +339,19 @@ def test_self_hashed_receipt_for_another_command_is_rejected(tmp_path: Path):
         "exit_code": 0,
     }
     forged["digest"] = checkpoint_receipt_digest(forged)
+    attempt_id = "forged-receipt-attempt"
+    memory.begin_checkpoint_attempt(
+        "fresh",
+        attempt_id=attempt_id,
+        started_at=now,
+    )
 
     with pytest.raises(MemoryIntegrityError, match="signed command"):
-        memory.record_checkpoint_receipt("fresh", forged)
+        memory.record_checkpoint_receipt(
+            "fresh",
+            forged,
+            attempt_id=attempt_id,
+        )
     assert memory.get_run("fresh")["satisfied_evidence"] == []
 
 
@@ -298,6 +390,103 @@ def test_second_checkpoint_invalidates_earlier_human_approval(tmp_path: Path):
     assert memory.missing_requirements(memory.get_run("fresh")) == ["human_approval"]
     with pytest.raises(MemoryIntegrityError, match="human_approval"):
         execute_release(memory, session_id="fresh", root=tmp_path)
+
+
+def test_approval_journal_outage_does_not_report_committed_authority_as_failed(
+    tmp_path: Path, monkeypatch
+):
+    memory, owner = _supervised_memory(tmp_path)
+    execute_checkpoint(memory, session_id="fresh", root=tmp_path)
+
+    def fail_journal(**_kwargs):
+        raise OSError("journal unavailable")
+
+    monkeypatch.setattr(memory.client, "write_event", fail_journal)
+    _approve(memory, owner)
+
+    run = memory.get_verified_run("fresh")
+    assert "human_approval" in run["satisfied_evidence"]
+    assert memory.missing_requirements(run) == []
+
+
+def test_failed_recheck_revokes_earlier_receipt_and_approval(tmp_path: Path):
+    failure_flag = tmp_path / ".comeback" / "fail-checkpoint"
+    checkpoint_code = (
+        "from pathlib import Path; "
+        "raise SystemExit(7 if Path('.comeback/fail-checkpoint').exists() else 0)"
+    )
+    memory, owner = _supervised_memory(
+        tmp_path,
+        checkpoint_argv=[sys.executable, "-c", checkpoint_code],
+    )
+    execute_checkpoint(memory, session_id="fresh", root=tmp_path)
+    _approve(memory, owner)
+    assert memory.missing_requirements(memory.get_run("fresh")) == []
+
+    failure_flag.parent.mkdir(parents=True, exist_ok=True)
+    failure_flag.write_text("fail\n", encoding="utf-8")
+    result, exit_code = execute_checkpoint(memory, session_id="fresh", root=tmp_path)
+
+    run = memory.get_run("fresh")
+    assert exit_code == 7
+    assert result["decision"] == "checkpoint_failed"
+    assert run["checkpoint_receipt"] is None
+    assert run.get("approval") is None
+    assert memory.missing_requirements(run) == [
+        "human_approval",
+        "release_check_passed",
+    ]
+    with pytest.raises(MemoryIntegrityError, match="required evidence"):
+        execute_release(memory, session_id="fresh", root=tmp_path)
+
+
+def test_timed_out_recheck_revokes_earlier_receipt_and_approval(tmp_path: Path):
+    slow_flag = tmp_path / ".comeback" / "slow-checkpoint"
+    checkpoint_code = (
+        "from pathlib import Path; import time; "
+        "time.sleep(5 if Path('.comeback/slow-checkpoint').exists() else 0)"
+    )
+    memory, owner = _supervised_memory(
+        tmp_path,
+        checkpoint_argv=[sys.executable, "-c", checkpoint_code],
+    )
+    execute_checkpoint(memory, session_id="fresh", root=tmp_path)
+    _approve(memory, owner)
+    slow_flag.parent.mkdir(parents=True, exist_ok=True)
+    slow_flag.write_text("slow\n", encoding="utf-8")
+
+    with pytest.raises(MemoryIntegrityError, match="timed out"):
+        execute_checkpoint(memory, session_id="fresh", root=tmp_path, timeout=1)
+
+    run = memory.get_run("fresh")
+    assert run["checkpoint_attempt"] is None
+    assert run["checkpoint_receipt"] is None
+    assert run.get("approval") is None
+    assert memory.missing_requirements(run) == [
+        "human_approval",
+        "release_check_passed",
+    ]
+
+
+def test_checkpoint_attempt_nonce_rejects_overlap_and_stale_completion(tmp_path: Path):
+    memory, _ = _supervised_memory(tmp_path)
+    now = datetime.now(timezone.utc).isoformat()
+    memory.begin_checkpoint_attempt("fresh", attempt_id="attempt-a", started_at=now)
+
+    with pytest.raises(MemoryIntegrityError, match="another checkpoint attempt"):
+        memory.begin_checkpoint_attempt("fresh", attempt_id="attempt-b", started_at=now)
+
+    memory.finish_checkpoint_attempt(
+        "fresh", attempt_id="attempt-a", reason="test_transition"
+    )
+    memory.begin_checkpoint_attempt("fresh", attempt_id="attempt-b", started_at=now)
+    with pytest.raises(MemoryIntegrityError, match="stale attempt"):
+        memory.record_checkpoint_receipt(
+            "fresh",
+            {},
+            attempt_id="attempt-a",
+        )
+    assert memory.get_run("fresh")["checkpoint_attempt"]["attempt_id"] == "attempt-b"
 
 
 def test_tampered_stored_approval_is_rejected_before_release(tmp_path: Path):

@@ -11,6 +11,7 @@ from .identity import repository_identity
 from .memory import InterventionMemory, MemoryIntegrityError
 from .policy import (
     classify_task,
+    comeback_capability_action,
     command_from_event,
     invokes_configured_argv,
     is_release_action,
@@ -18,9 +19,20 @@ from .policy import (
 )
 
 
-def _database(root: Path) -> Path:
+def _database(root: Path, event: dict[str, Any]) -> Path:
+    selected = event.get("_comeback_memory_db")
+    if isinstance(selected, str) and selected:
+        path = Path(selected).expanduser()
+        if not path.is_absolute():
+            raise MemoryIntegrityError("trusted memory database path must be absolute")
+        return path.resolve()
     configured = os.environ.get("COMEBACK_MEMORY_DB")
-    return Path(configured).expanduser().resolve() if configured else root / ".comeback" / "memory.db"
+    if configured:
+        path = Path(configured).expanduser()
+        if not path.is_absolute():
+            raise MemoryIntegrityError("COMEBACK_MEMORY_DB must be an absolute path")
+        return path.resolve()
+    return root / ".comeback" / "memory.db"
 
 
 def _agent_family(event: dict[str, Any]) -> str:
@@ -42,11 +54,20 @@ def capability_invocation(
         executable = Path(configured).expanduser()
         if not executable.is_absolute():
             raise MemoryIntegrityError("trusted capability executable must be absolute")
-        argv = [str(executable), action, "--session-id", session_id]
+        argv = [str(executable)]
     else:
         # Programmatic callers and the deterministic harness do not enter through
         # the installed console hook. Keep their launcher exact as well.
-        argv = [sys.executable, "-m", "comeback.cli", action, "--session-id", session_id]
+        argv = [sys.executable, "-m", "comeback.cli"]
+    selected_database = event.get("_comeback_memory_db")
+    if not isinstance(selected_database, str) or not selected_database:
+        raise MemoryIntegrityError("hook has no selected Sibyl memory database")
+    database = Path(selected_database).expanduser()
+    if not database.is_absolute():
+        raise MemoryIntegrityError("selected Sibyl memory database must be absolute")
+    argv.extend(
+        ["--db", str(database.resolve()), action, "--session-id", session_id]
+    )
     if os.name == "nt" and _agent_family(event) == "Codex":
         return "& " + " ".join(_powershell_quote(argument) for argument in argv)
     return shlex.join(argv)
@@ -121,7 +142,12 @@ def _pretool_result(
 def handle(event: dict[str, Any]) -> dict[str, Any] | None:
     cwd = event.get("cwd") or os.getcwd()
     root, repo_id = repository_identity(str(cwd))
-    memory = InterventionMemory(_database(root), repo_id)
+    database = _database(root, event)
+    # Every capability instruction carries the same absolute database chosen
+    # for this lifecycle event. The agent cannot silently switch to the CLI's
+    # default store between recall and enforcement.
+    event["_comeback_memory_db"] = str(database)
+    memory = InterventionMemory(database, repo_id)
     session_id = str(event.get("session_id", ""))
     event_name = event.get("hook_event_name")
 
@@ -147,12 +173,19 @@ def handle(event: dict[str, Any]) -> dict[str, Any] | None:
         }
 
     release_command = command_from_event(event).strip()
+    expected_checkpoint = capability_invocation(event, "checkpoint", session_id)
     expected_release = capability_invocation(event, "release", session_id)
-    exact_capability = is_release_capability(
+    exact_checkpoint = is_release_capability(
+        release_command,
+        expected_checkpoint,
+        working_directory=root,
+    )
+    exact_release = is_release_capability(
         release_command,
         expected_release,
         working_directory=root,
     )
+    comeback_action = comeback_capability_action(event)
     configured_raw_action = False
     preliminary_run: dict[str, Any] | None = None
     if event_name == "PreToolUse":
@@ -172,7 +205,11 @@ def handle(event: dict[str, Any]) -> dict[str, Any] | None:
             for lesson in candidate_lessons
         )
     if event_name == "PreToolUse" and (
-        is_release_action(event) or exact_capability or configured_raw_action
+        is_release_action(event)
+        or exact_checkpoint
+        or exact_release
+        or comeback_action is not None
+        or configured_raw_action
     ):
         try:
             run = preliminary_run or memory.get_run(session_id)
@@ -207,6 +244,40 @@ def handle(event: dict[str, Any]) -> dict[str, Any] | None:
                 process_id=os.getpid(),
                 force=True,
             )
+        if comeback_action == "checkpoint" or exact_checkpoint:
+            if (
+                not run["lesson_ids"]
+                or "release_check_passed" not in run["required_evidence"]
+            ):
+                return _pretool_result(
+                    memory,
+                    event,
+                    decision="deny",
+                    reason="Comeback has no signed checkpoint capability for this session.",
+                )
+            if not exact_checkpoint:
+                return _pretool_result(
+                    memory,
+                    event,
+                    decision="deny",
+                    reason=(
+                        "Comeback requires its exact signed checkpoint capability. Run exactly: "
+                        + expected_checkpoint
+                    ),
+                )
+            return _pretool_result(
+                memory,
+                event,
+                decision="allow",
+                reason=f"Comeback {run['mode']}: exact checkpoint capability allowed.",
+            )
+        if comeback_action not in {None, "release"}:
+            return _pretool_result(
+                memory,
+                event,
+                decision="deny",
+                reason="Comeback refuses combined or ambiguous capability invocations.",
+            )
         missing = memory.missing_requirements(run)
         if missing:
             return _pretool_result(
@@ -219,7 +290,7 @@ def handle(event: dict[str, Any]) -> dict[str, Any] | None:
                     + " before this release action."
                 ),
             )
-        if run["lesson_ids"] and not exact_capability:
+        if run["lesson_ids"] and not exact_release:
             return _pretool_result(
                 memory,
                 event,
@@ -291,6 +362,11 @@ def main() -> None:
         event = json.load(sys.stdin)
         if not isinstance(event, dict):
             raise MemoryIntegrityError("hook input must be an object")
+        # Lifecycle JSON is untrusted. Only command-line values installed in
+        # the reviewed hook launcher may populate private Comeback fields.
+        event.pop("_comeback_agent_family", None)
+        event.pop("_comeback_cli_executable", None)
+        event.pop("_comeback_memory_db", None)
         if agent_family:
             event["_comeback_agent_family"] = agent_family
         if cli_executable:

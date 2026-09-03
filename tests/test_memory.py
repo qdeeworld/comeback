@@ -389,6 +389,20 @@ def test_signed_action_specs_reject_shell_interpreters(tmp_path, shell):
         InterventionMemory(tmp_path / "memory.db", "repo-a").record_intervention(record)
 
 
+@pytest.mark.parametrize("batch", ["deploy.cmd", "C:/tools/release.BAT"])
+def test_signed_action_specs_reject_windows_batch_files(tmp_path, batch):
+    owner = Account.create()
+    record = signed_record("repo-a", owner.key.hex(), owner.address)
+    record["signed_fields"]["checkpoint_spec"]["argv"] = [batch, "--verify"]
+    record["intervention_signature"] = Account.sign_message(
+        encode_defunct(text=intervention_message(record["signed_fields"])),
+        private_key=owner.key,
+    ).signature.hex()
+
+    with pytest.raises(MemoryIntegrityError, match="Windows batch file"):
+        InterventionMemory(tmp_path / "memory.db", "repo-a").record_intervention(record)
+
+
 def test_existing_open_run_is_reverified_before_reuse(tmp_path):
     owner = Account.create()
     memory = InterventionMemory(tmp_path / "memory.db", "repo-a")
