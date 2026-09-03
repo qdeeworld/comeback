@@ -1,17 +1,31 @@
+import io
+import json
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
 from eth_account import Account
 from eth_account.messages import encode_defunct
 
-from comeback.hook import handle
+from comeback.hook import handle, main
 from comeback.identity import repository_identity
 from comeback.memory import InterventionMemory
-from comeback.policy import checkpoint_invocation
 from comeback.signing import intervention_message
 
 
-def test_only_signed_repository_checkpoint_satisfies_gate(tmp_path: Path, monkeypatch):
+def _source_run(
+    memory: InterventionMemory, session_id: str, agent_family: str = "Codex"
+) -> None:
+    memory.start_run(
+        session_id=session_id,
+        task_class="release",
+        area="release_workflow",
+        agent_family=agent_family,
+        model="test-source",
+    )
+
+
+def test_post_tool_text_cannot_forge_checkpoint_evidence(tmp_path: Path, monkeypatch):
     db = tmp_path / "memory.db"
     monkeypatch.setenv("COMEBACK_MEMORY_DB", str(db))
     owner = Account.create()
@@ -23,8 +37,10 @@ def test_only_signed_repository_checkpoint_satisfies_gate(tmp_path: Path, monkey
         "area": "release_workflow",
         "agent_family": "Codex",
         "severity": "release_blocker",
-        "checkpoint_command": "pnpm run release:check",
-        "checkpoint_success_marker": "COMEBACK_CHECK_OK_TEST",
+        "action_schema": 2,
+        "checkpoint_spec": {"argv": ["pnpm", "run", "release:check"], "timeout_seconds": 600},
+        "release_spec": {"argv": ["git", "push", "https://example.test/org/repo.git", "HEAD:refs/heads/main"], "timeout_seconds": 600},
+        "state_policy": {"bind_head": True, "require_clean_git": True},
         "required_evidence": ["release_check_passed", "human_approval"],
         "authorized_closer": owner.address.lower(),
         "source_session_id": "corrected-session",
@@ -34,6 +50,7 @@ def test_only_signed_repository_checkpoint_satisfies_gate(tmp_path: Path, monkey
         encode_defunct(text=intervention_message(signed_fields)), private_key=owner.key
     ).signature.hex()
     memory = InterventionMemory(db, repo_id)
+    _source_run(memory, "corrected-session")
     memory.record_intervention(
         {
             "signed_fields": signed_fields,
@@ -47,7 +64,7 @@ def test_only_signed_repository_checkpoint_satisfies_gate(tmp_path: Path, monkey
         "model": "test",
         "permission_mode": "default",
     }
-    handle({**common, "hook_event_name": "UserPromptSubmit", "prompt": "Deploy this release."})
+    handle({**common, "hook_event_name": "UserPromptSubmit", "prompt": "Please continue."})
     handle(
         {
             **common,
@@ -64,17 +81,11 @@ def test_only_signed_repository_checkpoint_satisfies_gate(tmp_path: Path, monkey
             **common,
             "hook_event_name": "PostToolUse",
             "tool_name": "Bash",
-            "tool_input": {
-                "command": checkpoint_invocation(
-                    "pnpm run release:check", "COMEBACK_CHECK_OK_TEST"
-                )
-            },
+            "tool_input": {"command": "printf 'COMEBACK_CHECK_OK_TEST'"},
             "tool_response": "RELEASE CHECK PASSED\nCOMEBACK_CHECK_OK_TEST\n",
         }
     )
-    assert memory.get_run("fresh-session")["satisfied_evidence"] == [
-        "release_check_passed"
-    ]
+    assert memory.get_run("fresh-session")["satisfied_evidence"] == []
 
 
 def test_release_action_promotes_vague_prompt_and_recalls_lesson(tmp_path: Path, monkeypatch):
@@ -89,7 +100,10 @@ def test_release_action_promotes_vague_prompt_and_recalls_lesson(tmp_path: Path,
         "area": "release_workflow",
         "agent_family": "Codex",
         "severity": "release_blocker",
-        "checkpoint_command": "./scripts/check-milestone.sh",
+        "action_schema": 2,
+        "checkpoint_spec": {"argv": ["python", "scripts/check_milestone.py"], "timeout_seconds": 600},
+        "release_spec": {"argv": ["forge", "script", "Deploy.s.sol", "--broadcast"], "timeout_seconds": 600},
+        "state_policy": {"bind_head": True, "require_clean_git": True},
         "required_evidence": ["release_check_passed", "human_approval"],
         "authorized_closer": owner.address.lower(),
         "source_session_id": "corrected-session",
@@ -99,6 +113,7 @@ def test_release_action_promotes_vague_prompt_and_recalls_lesson(tmp_path: Path,
         encode_defunct(text=intervention_message(signed_fields)), private_key=owner.key
     ).signature.hex()
     memory = InterventionMemory(db, repo_id)
+    _source_run(memory, "corrected-session")
     memory.record_intervention(
         {
             "signed_fields": signed_fields,
@@ -124,7 +139,7 @@ def test_release_action_promotes_vague_prompt_and_recalls_lesson(tmp_path: Path,
     run = memory.get_run("vague-session")
     reason = blocked["hookSpecificOutput"]["permissionDecisionReason"]
     assert run["task_class"] == "release"
-    assert run["checkpoint_command"] == "./scripts/check-milestone.sh"
+    assert run["checkpoint_spec"]["argv"] == ["python", "scripts/check_milestone.py"]
     assert "remembered intervention requires" in reason
 
 
@@ -142,7 +157,10 @@ def test_claude_hook_recalls_cross_agent_codex_intervention(tmp_path: Path, monk
         "agent_family": "Codex",
         "agent_scope": "all_supported",
         "severity": "release_blocker",
-        "checkpoint_command": "pnpm run release:check",
+        "action_schema": 2,
+        "checkpoint_spec": {"argv": ["pnpm", "run", "release:check"], "timeout_seconds": 600},
+        "release_spec": {"argv": ["git", "push", "https://example.test/org/repo.git", "HEAD:refs/heads/main"], "timeout_seconds": 600},
+        "state_policy": {"bind_head": True, "require_clean_git": True},
         "required_evidence": ["release_check_passed", "human_approval"],
         "authorized_closer": owner.address.lower(),
         "source_session_id": "codex-correction",
@@ -151,7 +169,9 @@ def test_claude_hook_recalls_cross_agent_codex_intervention(tmp_path: Path, monk
     signature = Account.sign_message(
         encode_defunct(text=intervention_message(signed_fields)), private_key=owner.key
     ).signature.hex()
-    InterventionMemory(db, repo_id).record_intervention(
+    memory = InterventionMemory(db, repo_id)
+    _source_run(memory, "codex-correction")
+    memory.record_intervention(
         {
             "signed_fields": signed_fields,
             "intervention_signature": signature,
@@ -178,3 +198,80 @@ def test_claude_hook_recalls_cross_agent_codex_intervention(tmp_path: Path, monk
     assert run["agent_family"] == "ClaudeCode"
     assert run["lesson_ids"] == ["release-release_workflow-codex"]
     assert blocked["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+def test_literal_configured_release_is_denied_even_outside_builtin_vocabulary(
+    tmp_path: Path, monkeypatch
+):
+    db = tmp_path / "memory.db"
+    monkeypatch.setenv("COMEBACK_MEMORY_DB", str(db))
+    owner = Account.create()
+    _, repo_id = repository_identity(tmp_path)
+    signed_fields = {
+        "lesson_id": "release-release_workflow-codex",
+        "repo_id": repo_id,
+        "task_class": "release",
+        "area": "release_workflow",
+        "agent_family": "Codex",
+        "severity": "release_blocker",
+        "action_schema": 2,
+        "checkpoint_spec": {"argv": ["python", "check.py"], "timeout_seconds": 60},
+        "release_spec": {"argv": ["python", "deploy_prod.py"], "timeout_seconds": 60},
+        "state_policy": {"bind_head": True, "require_clean_git": True},
+        "required_evidence": ["release_check_passed", "human_approval"],
+        "authorized_closer": owner.address.lower(),
+        "source_session_id": "source",
+        "incident_at": datetime.now(timezone.utc).isoformat(),
+    }
+    signature = Account.sign_message(
+        encode_defunct(text=intervention_message(signed_fields)), private_key=owner.key
+    ).signature.hex()
+    memory = InterventionMemory(db, repo_id)
+    _source_run(memory, "source")
+    memory.record_intervention(
+        {
+            "signed_fields": signed_fields,
+            "intervention_signature": signature,
+            "incident_summary": "Configured release skipped its check.",
+        }
+    )
+    common = {
+        "session_id": "fresh-custom-release",
+        "cwd": str(tmp_path),
+        "model": "test",
+    }
+    handle({**common, "hook_event_name": "UserPromptSubmit", "prompt": "Please continue."})
+
+    blocked = handle(
+        {
+            **common,
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Bash",
+            "tool_use_id": "configured-tool",
+            "tool_input": {"command": "python deploy_prod.py"},
+        }
+    )
+
+    assert blocked["hookSpecificOutput"]["permissionDecision"] == "deny"
+    assert memory.get_run("fresh-custom-release")["task_class"] == "release"
+    assert len(memory.pretool_decisions("fresh-custom-release")) == 1
+
+
+def test_uncaught_stop_identity_error_is_emitted_as_fail_closed_block(
+    tmp_path: Path, monkeypatch, capsys
+):
+    (tmp_path / ".comeback-repository.json").write_text("{broken", encoding="utf-8")
+    event = {
+        "session_id": "stop-corrupt-anchor",
+        "cwd": str(tmp_path),
+        "hook_event_name": "Stop",
+        "stop_hook_active": False,
+    }
+    monkeypatch.setattr(sys, "argv", ["comeback-hook"])
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(event)))
+
+    main()
+
+    result = json.loads(capsys.readouterr().out)
+    assert result["decision"] == "block"
+    assert "fail-closed" in result["reason"]

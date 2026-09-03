@@ -8,18 +8,25 @@ from typing import Any
 
 MODES = ("AUTONOMOUS", "CHECKPOINTED", "HUMAN_REQUIRED")
 
-_RELEASE_PROMPT = re.compile(
-    r"\b(release|deploy|deployment|publish|production|merge|git\s+push|ship)\b",
-    re.IGNORECASE,
+_RELEASE_PROMPT_PATTERNS = (
+    re.compile(r"\bgit\s+push\b", re.IGNORECASE),
+    re.compile(r"\bgh\s+pr\s+merge\b", re.IGNORECASE),
+    re.compile(r"\bmerge\s+(?:this\s+|the\s+)?(?:pr|pull\s+request)\b", re.IGNORECASE),
+    re.compile(
+        r"\b(?:deploy|publish|release)\s+(?:this|it|the|to|on|into|our|my|a)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(r"\b(?:deploy|publish|release)\s*[.!?]?\s*$", re.IGNORECASE),
+    re.compile(r"\bship\s+(?:this|it|the\s+(?:release|build|app|site|service))\b", re.IGNORECASE),
 )
 _PACKAGE_MANAGERS = {"npm", "pnpm", "yarn", "bun"}
 _RELEASE_SCRIPTS = {"deploy", "release", "publish"}
 _SHELLS = {"bash", "dash", "sh", "zsh"}
-_COMMAND_SEPARATORS = {"&&", "||", ";", "|"}
+_COMMAND_SEPARATORS = {"&&", "||", ";", "|", "&", "\n"}
 
 
 def classify_task(prompt: str) -> tuple[str, str]:
-    if _RELEASE_PROMPT.search(prompt):
+    if any(pattern.search(prompt) for pattern in _RELEASE_PROMPT_PATTERNS):
         return "release", "release_workflow"
     return "low_risk", "general"
 
@@ -43,14 +50,18 @@ def is_release_action(event: dict[str, Any]) -> bool:
 
 
 def _shell_words(command: str) -> list[str]:
-    lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|")
+    lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|\n")
+    # Keep unquoted newlines as command separators while shlex still preserves
+    # a newline inside quotes as part of the quoted argument.
+    lexer.whitespace = " \t\r"
     lexer.whitespace_split = True
     lexer.commenters = ""
     return list(lexer)
 
 
 def _clean_word(word: str) -> str:
-    return PurePath(word.strip("(){};")).name.lower()
+    cleaned = word.strip("(){};").replace("\\", "/")
+    return PurePath(cleaned).name.lower()
 
 
 def _command_segments(words: list[str]) -> list[list[str]]:
@@ -80,7 +91,7 @@ def _segment_is_release(words: list[str]) -> bool:
         return False
 
     executable = normalized[index]
-    if executable in {"command", "sudo"}:
+    if executable in {"command", "exec", "sudo"}:
         index += 1
         while index < len(normalized) and words[index].startswith("-"):
             index += 1
@@ -136,10 +147,34 @@ def _segment_is_release(words: list[str]) -> bool:
             return True
     if executable == "forge" and tail[:1] == ["script"] and "--broadcast" in tail:
         return True
+    if executable in {"comeback", "comeback.exe"} and tail[:1] == ["release"]:
+        return True
     if executable.startswith("python") and tail:
         script = next((word for word in tail if not word.startswith("-")), "")
         return script in {"release_candidate.py", "release-candidate.py"}
     return executable in {"release_candidate.py", "release-candidate.py"}
+
+
+def is_release_capability(
+    command: str,
+    expected_invocation: str,
+    *,
+    working_directory: str | Path | None = None,
+) -> bool:
+    """Match only the exact trusted release launcher injected by Comeback.
+
+    Parsing a command and accepting a basename such as ``comeback`` is unsafe:
+    a repository can provide a counterfeit executable and shells evaluate command
+    substitutions before the real program starts. Exact equality deliberately
+    rejects alternate paths, extra flags, substitutions, redirections and command
+    chains. A literal ``cd`` to the same repository is the sole accepted prefix.
+    """
+
+    return invocation_matches(
+        command,
+        expected_invocation,
+        working_directory=working_directory,
+    )
 
 
 def _git_arguments(arguments: list[str]) -> list[str]:
@@ -195,18 +230,29 @@ def _command_after_same_directory_prefix(
     command: str, working_directory: str | Path | None
 ) -> str | None:
     candidate = command.strip()
-    match = re.fullmatch(r"cd\s+(.+?)\s*&&\s*(.+)", candidate, flags=re.DOTALL)
+    match = re.fullmatch(
+        r"(?:cd|set-location)\s+(.+?)\s*(?:&&|;)\s*(.+)",
+        candidate,
+        flags=re.DOTALL | re.IGNORECASE,
+    )
     if not match:
         return candidate
     if working_directory is None:
         return None
-    try:
-        path_words = shlex.split(match.group(1), posix=True)
-    except ValueError:
+    raw_target = match.group(1).strip()
+    if raw_target.lower().startswith("/d "):
+        raw_target = raw_target[3:].strip()
+    if raw_target.lower().startswith("-literalpath "):
+        raw_target = raw_target[len("-literalpath ") :].strip()
+    if (
+        len(raw_target) >= 2
+        and raw_target[0] in {"'", '"'}
+        and raw_target[-1] == raw_target[0]
+    ):
+        raw_target = raw_target[1:-1]
+    if not raw_target or raw_target[0] in {"$", "`"}:
         return None
-    if len(path_words) != 1:
-        return None
-    target = Path(path_words[0]).expanduser()
+    target = Path(raw_target).expanduser()
     if not target.is_absolute():
         target = Path(working_directory) / target
     try:
@@ -225,6 +271,44 @@ def invocation_matches(
 ) -> bool:
     candidate = _command_after_same_directory_prefix(command, working_directory)
     return candidate is not None and candidate == expected_invocation.strip()
+
+
+def invokes_configured_argv(
+    command: str,
+    argv: list[str],
+    *,
+    working_directory: str | Path | None = None,
+) -> bool:
+    """Recognize the literal configured action vector across supported shells.
+
+    This is deliberately an exact argv comparison, not equivalence analysis.
+    It closes the important case where a configured executable is outside the
+    built-in release vocabulary, while arbitrary wrappers remain outside the
+    raw-command defense-in-depth boundary.
+    """
+
+    candidate = _command_after_same_directory_prefix(command, working_directory)
+    if candidate is None:
+        return False
+    candidate = candidate.strip()
+    if candidate.startswith("& "):
+        candidate = candidate[2:].strip()
+    renderings = {shlex.join(argv)}
+    try:
+        import subprocess
+
+        renderings.add(subprocess.list2cmdline(argv))
+    except (ImportError, ValueError):  # pragma: no cover - stdlib/invalid argv guard
+        pass
+    if candidate in renderings:
+        return True
+    for posix in (True, False):
+        try:
+            if shlex.split(candidate, posix=posix) == argv:
+                return True
+        except ValueError:
+            continue
+    return False
 
 
 def is_success_wrapped(

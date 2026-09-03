@@ -19,6 +19,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest]
+        python: ["3.12", "3.13"]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 10
     steps:
@@ -28,7 +29,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          python-version: "3.12"
+          python-version: ${{ matrix.python }}
           cache: pip
 
       - name: Install
@@ -43,14 +44,14 @@ jobs:
       - name: Replay fresh-session Sibyl gate
         run: python scripts/run_validation_gate.py > comeback-validation.json
 
-      - name: Execute installed hooks through Bash
+      - name: Execute installed hooks through their real platform shells
         shell: bash
         run: python scripts/run_installed_hook_gate.py > comeback-installed-hook.json
 
       - name: Upload replay artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: comeback-validation-${{ matrix.os }}-${{ github.sha }}
+          name: comeback-validation-${{ matrix.os }}-py${{ matrix.python }}-${{ github.sha }}
           path: |
             comeback-validation.json
             comeback-installed-hook.json

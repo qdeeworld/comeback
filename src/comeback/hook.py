@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import sys
 from pathlib import Path
 from typing import Any
@@ -9,13 +10,11 @@ from typing import Any
 from .identity import repository_identity
 from .memory import InterventionMemory, MemoryIntegrityError
 from .policy import (
-    checkpoint_invocation,
     classify_task,
     command_from_event,
-    invocation_matches,
-    is_success_wrapped,
+    invokes_configured_argv,
     is_release_action,
-    tool_succeeded,
+    is_release_capability,
 )
 
 
@@ -31,16 +30,50 @@ def _agent_family(event: dict[str, Any]) -> str:
     return os.environ.get("COMEBACK_AGENT_FAMILY", "Codex")
 
 
-def _context(run: dict[str, Any]) -> str:
+def _powershell_quote(value: str) -> str:
+    return "'" + value.replace("'", "''") + "'"
+
+
+def capability_invocation(
+    event: dict[str, Any], action: str, session_id: str
+) -> str:
+    configured = event.get("_comeback_cli_executable")
+    if isinstance(configured, str) and configured:
+        executable = Path(configured).expanduser()
+        if not executable.is_absolute():
+            raise MemoryIntegrityError("trusted capability executable must be absolute")
+        argv = [str(executable), action, "--session-id", session_id]
+    else:
+        # Programmatic callers and the deterministic harness do not enter through
+        # the installed console hook. Keep their launcher exact as well.
+        argv = [sys.executable, "-m", "comeback.cli", action, "--session-id", session_id]
+    if os.name == "nt" and _agent_family(event) == "Codex":
+        return "& " + " ".join(_powershell_quote(argument) for argument in argv)
+    return shlex.join(argv)
+
+
+def _context(run: dict[str, Any], event: dict[str, Any]) -> str:
+    if run["status"] != "open":
+        return (
+            f"Comeback supervision session is already {run['status']}. "
+            "Start a genuinely fresh agent session before another release attempt."
+        )
     lessons = len(run["lesson_ids"])
     requirements = ", ".join(run["required_evidence"]) or "none"
-    checkpoint = checkpoint_invocation(
-        run.get("checkpoint_command", ""), run.get("checkpoint_success_marker", "")
-    ) or "none"
+    checkpoint = (
+        capability_invocation(event, "checkpoint", run["session_id"])
+        if "release_check_passed" in run["required_evidence"]
+        else "ordinary repository checks"
+    )
+    release = (
+        capability_invocation(event, "release", run["session_id"])
+        if run["lesson_ids"]
+        else "the ordinary repository release command"
+    )
     return (
         f"Comeback supervision: {run['mode']}. "
         f"Recalled intervention lessons: {lessons}. Required evidence: {requirements}. "
-        f"Remembered checkpoint command: {checkpoint}. "
+        f"Checkpoint capability: {checkpoint}. Release capability: {release}. "
         "Do not claim completion while this run remains open."
     )
 
@@ -51,6 +84,36 @@ def _deny(reason: str) -> dict[str, Any]:
             "hookEventName": "PreToolUse",
             "permissionDecision": "deny",
             "permissionDecisionReason": reason,
+        }
+    }
+
+
+def _block_stop(reason: str, event: dict[str, Any]) -> dict[str, Any]:
+    if event.get("stop_hook_active"):
+        return {"continue": False, "systemMessage": reason}
+    return {"decision": "block", "reason": reason}
+
+
+def _pretool_result(
+    memory: InterventionMemory,
+    event: dict[str, Any],
+    *,
+    decision: str,
+    reason: str,
+) -> dict[str, Any]:
+    memory.record_pretool_decision(
+        session_id=str(event["session_id"]),
+        tool_use_id=str(event.get("tool_use_id", "unknown")),
+        command=command_from_event(event),
+        decision=decision,
+        reason=reason,
+    )
+    if decision == "deny":
+        return _deny(reason)
+    return {
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "additionalContext": reason,
         }
     }
 
@@ -79,15 +142,61 @@ def handle(event: dict[str, Any]) -> dict[str, Any] | None:
         return {
             "hookSpecificOutput": {
                 "hookEventName": "UserPromptSubmit",
-                "additionalContext": _context(run),
+                "additionalContext": _context(run, event),
             }
         }
 
-    if event_name == "PreToolUse" and is_release_action(event):
+    release_command = command_from_event(event).strip()
+    expected_release = capability_invocation(event, "release", session_id)
+    exact_capability = is_release_capability(
+        release_command,
+        expected_release,
+        working_directory=root,
+    )
+    configured_raw_action = False
+    preliminary_run: dict[str, Any] | None = None
+    if event_name == "PreToolUse":
         try:
-            run = memory.get_run(session_id)
+            preliminary_run = memory.get_run(session_id)
+        except MemoryIntegrityError:
+            preliminary_run = None
+        candidate_lessons = memory.matching_lessons(
+            "release", "release_workflow", _agent_family(event)
+        )
+        configured_raw_action = any(
+            invokes_configured_argv(
+                release_command,
+                lesson["release_spec"]["argv"],
+                working_directory=root,
+            )
+            for lesson in candidate_lessons
+        )
+    if event_name == "PreToolUse" and (
+        is_release_action(event) or exact_capability or configured_raw_action
+    ):
+        try:
+            run = preliminary_run or memory.get_run(session_id)
         except MemoryIntegrityError as exc:
             return _deny(f"Comeback fail-closed: {exc}")
+        if run["status"] != "open":
+            return _pretool_result(
+                memory,
+                event,
+                decision="deny",
+                reason=(
+                    f"Comeback session is already {run['status']}; start a genuinely fresh "
+                    "agent session before another release attempt."
+                ),
+            )
+        try:
+            run = memory.get_verified_run(session_id)
+        except MemoryIntegrityError as exc:
+            return _pretool_result(
+                memory,
+                event,
+                decision="deny",
+                reason=f"Comeback fail-closed: {exc}",
+            )
         if run["task_class"] != "release":
             run = memory.start_run(
                 session_id=session_id,
@@ -100,107 +209,92 @@ def handle(event: dict[str, Any]) -> dict[str, Any] | None:
             )
         missing = memory.missing_requirements(run)
         if missing:
-            return _deny(
-                f"Comeback {run['mode']}: remembered intervention requires "
-                + ", ".join(missing)
-                + " before this release action."
+            return _pretool_result(
+                memory,
+                event,
+                decision="deny",
+                reason=(
+                    f"Comeback {run['mode']}: remembered intervention requires "
+                    + ", ".join(missing)
+                    + " before this release action."
+                ),
             )
-        release_marker = run.get("release_success_marker", "")
-        release_command = command_from_event(event).strip()
-        if release_marker and not is_success_wrapped(
-            release_command, release_marker, working_directory=root
-        ):
-            protected_command = checkpoint_invocation(release_command, release_marker)
-            return _deny(
-                "Comeback requires an exit-bound release receipt. Run exactly: "
-                + protected_command
+        if run["lesson_ids"] and not exact_capability:
+            return _pretool_result(
+                memory,
+                event,
+                decision="deny",
+                reason=(
+                    "Comeback requires its signed, one-shot release capability. Run exactly: "
+                    + expected_release
+                ),
             )
-        return {
-            "hookSpecificOutput": {
-                "hookEventName": "PreToolUse",
-                "additionalContext": f"Comeback {run['mode']}: release gate satisfied.",
-            }
-        }
-
-    if event_name == "PostToolUse" and event.get("tool_name") == "Bash":
-        try:
-            run = memory.get_run(session_id)
-        except MemoryIntegrityError:
-            run = None
-        checkpoint_command = run.get("checkpoint_command", "") if run else ""
-        checkpoint_marker = run.get("checkpoint_success_marker", "") if run else ""
-        expected_invocation = checkpoint_invocation(checkpoint_command, checkpoint_marker)
-        is_checkpoint = bool(checkpoint_command) and invocation_matches(
-            command_from_event(event),
-            expected_invocation,
-            working_directory=root,
+        return _pretool_result(
+            memory,
+            event,
+            decision="allow",
+            reason=f"Comeback {run['mode']}: release gate satisfied.",
         )
-    else:
-        is_checkpoint = False
-
-    if event_name == "PostToolUse" and is_checkpoint:
-        if tool_succeeded(event, expected_marker=checkpoint_marker):
-            run = memory.add_evidence(session_id, "release_check_passed")
-            return {
-                "hookSpecificOutput": {
-                    "hookEventName": "PostToolUse",
-                    "additionalContext": "Comeback recorded release_check_passed in Sibyl. "
-                    f"Remaining: {', '.join(memory.missing_requirements(run)) or 'none'}.",
-                }
-            }
-        return {
-            "decision": "block",
-            "reason": "Comeback observed a failed release check. Repair it before release.",
-        }
-
-    if event_name == "PostToolUse" and is_release_action(event):
-        try:
-            run = memory.get_run(session_id)
-        except MemoryIntegrityError:
-            return None
-        release_marker = run.get("release_success_marker", "")
-        run = memory.record_release_outcome(
-            session_id,
-            success=tool_succeeded(event, expected_marker=release_marker),
-        )
-        return {
-            "hookSpecificOutput": {
-                "hookEventName": "PostToolUse",
-                "additionalContext": f"Comeback stored release outcome: {run['outcome']}.",
-            }
-        }
 
     if event_name == "Stop":
         try:
             run = memory.get_run(session_id)
-        except MemoryIntegrityError:
+        except MemoryIntegrityError as exc:
+            if "no Sibyl supervision run exists" in str(exc):
+                return None
+            return _block_stop(f"Comeback fail-closed: {exc}", event)
+        if run["status"] in {"completed", "failed"}:
             return None
-        if run["status"] == "open" and run["mode"] != "AUTONOMOUS":
-            if event.get("stop_hook_active"):
-                return {
-                    "continue": False,
-                    "systemMessage": "Comeback left this run open; operator action is still required.",
-                }
-            return {
-                "decision": "block",
-                "reason": "Comeback cannot finish: "
-                + (", ".join(memory.missing_requirements(run)) or "the supervised release action has not completed"),
-            }
+        if run["status"] in {"executing", "unknown"}:
+            return _block_stop(
+                (
+                    f"Comeback cannot finish: release outcome is {run['status']}; "
+                    "operator reconciliation is required."
+                ),
+                event,
+            )
+        try:
+            run = memory.get_verified_run(session_id)
+        except MemoryIntegrityError as exc:
+            return _block_stop(f"Comeback fail-closed: {exc}", event)
+        if (
+            run["status"] == "open"
+            and run["lesson_ids"]
+            and run["task_class"] == "release"
+        ):
+            reason = "Comeback cannot finish: " + (
+                ", ".join(memory.missing_requirements(run))
+                or "the supervised release action has not completed"
+            )
+            return _block_stop(reason, event)
     return None
 
 
 def main() -> None:
     try:
         agent_family = None
-        if sys.argv[1:]:
-            if len(sys.argv) != 3 or sys.argv[1] != "--agent-family" or not sys.argv[2]:
-                raise MemoryIntegrityError("usage: comeback-hook [--agent-family NAME]")
-            agent_family = sys.argv[2]
+        cli_executable = None
+        arguments = list(sys.argv[1:])
+        while arguments:
+            option = arguments.pop(0)
+            if option not in {"--agent-family", "--cli-executable"} or not arguments:
+                raise MemoryIntegrityError(
+                    "usage: comeback-hook [--agent-family NAME] [--cli-executable PATH]"
+                )
+            value = arguments.pop(0)
+            if not value:
+                raise MemoryIntegrityError(f"{option} requires a value")
+            if option == "--agent-family":
+                agent_family = value
+            else:
+                cli_executable = value
         event = json.load(sys.stdin)
         if not isinstance(event, dict):
             raise MemoryIntegrityError("hook input must be an object")
         if agent_family:
             event["_comeback_agent_family"] = agent_family
+        if cli_executable:
+            event["_comeback_cli_executable"] = cli_executable
         output = handle(event)
         if output is not None:
             print(json.dumps(output, sort_keys=True))
@@ -208,6 +302,14 @@ def main() -> None:
         event_name = locals().get("event", {}).get("hook_event_name") if isinstance(locals().get("event"), dict) else None
         if event_name == "PreToolUse":
             print(json.dumps(_deny(f"Comeback fail-closed: {exc}"), sort_keys=True))
+            return
+        if event_name == "Stop":
+            print(
+                json.dumps(
+                    _block_stop(f"Comeback fail-closed: {exc}", event),
+                    sort_keys=True,
+                )
+            )
             return
         print(json.dumps({"systemMessage": f"Comeback hook error: {exc}"}, sort_keys=True))
 

@@ -14,6 +14,7 @@ from typing import Any
 from eth_account import Account
 from eth_account.messages import encode_defunct
 
+from comeback.hook import capability_invocation
 from comeback.identity import repository_identity
 from comeback.memory import InterventionMemory
 from comeback.signing import approval_message, intervention_message
@@ -78,7 +79,16 @@ def sign_intervention(repo_id: str, owner: Any, session_id: str) -> dict[str, An
         "agent_family": "Codex",
         "agent_scope": "all_supported",
         "severity": "release_blocker",
-        "checkpoint_command": "python scripts/release_check.py",
+        "action_schema": 2,
+        "checkpoint_spec": {
+            "argv": [sys.executable, "scripts/release_check.py"],
+            "timeout_seconds": 600,
+        },
+        "release_spec": {
+            "argv": [sys.executable, "scripts/release_candidate.py"],
+            "timeout_seconds": 600,
+        },
+        "state_policy": {"bind_head": True, "require_clean_git": False},
         "required_evidence": ["release_check_passed", "human_approval"],
         "authorized_closer": owner.address.lower(),
         "source_session_id": session_id,
@@ -123,6 +133,17 @@ def main() -> None:
         root = Path(directory)
         live_db = root / "live.db"
         disabled_db = root / "disabled.db"
+        source_start_pid, source_context = hook(
+            live_db,
+            event(
+                "UserPromptSubmit",
+                session_one,
+                prompt="Deploy the release to production.",
+            ),
+        )
+        source_pretool_pid, source_decision = pretool_release(live_db, session_one)
+        if decision(source_decision) == "deny":
+            raise RuntimeError("session-one release was unexpectedly denied before intervention")
         record = sign_intervention(repo_id, owner, session_one)
         writer_pid, writer_output = run_process(
             [
@@ -213,16 +234,19 @@ def main() -> None:
             raise RuntimeError("unrelated low-risk work was over-blocked")
 
         _, before_check = pretool_release(live_db, session_two)
-        _, check_result = hook(
-            live_db,
-            event(
-                "PostToolUse",
+        checkpoint_pid, checkpoint_output = run_process(
+            [
+                sys.executable,
+                "-m",
+                "comeback.cli",
+                "--db",
+                str(live_db),
+                "--repo",
+                str(ROOT),
+                "checkpoint",
+                "--session-id",
                 session_two,
-                tool_name="Bash",
-                tool_use_id=str(uuid.uuid4()),
-                tool_input={"command": "python scripts/release_check.py"},
-                tool_response={"exit_code": 0, "output": "RELEASE CHECK PASSED"},
-            ),
+            ]
         )
         run_after_check = InterventionMemory(live_db, repo_id).get_run(session_two)
 
@@ -272,20 +296,40 @@ def main() -> None:
                 good_signature,
             ]
         )
-        _, allowed = pretool_release(live_db, session_two)
-        if decision(allowed) == "deny":
-            raise RuntimeError("authorized evidence did not unlock release")
-        _, outcome = hook(
+        _, raw_release = pretool_release(live_db, session_two)
+        _, allowed = hook(
             live_db,
             event(
-                "PostToolUse",
+                "PreToolUse",
                 session_two,
                 tool_name="Bash",
                 tool_use_id=str(uuid.uuid4()),
-                tool_input={"command": "python scripts/release_candidate.py"},
-                tool_response={"exit_code": 0, "output": "RELEASE CANDIDATE EXECUTED"},
+                tool_input={
+                    "command": capability_invocation(
+                        event("PreToolUse", session_two),
+                        "release",
+                        session_two,
+                    )
+                },
             ),
         )
+        if decision(raw_release) != "deny" or decision(allowed) == "deny":
+            raise RuntimeError("signed release capability boundary was not enforced")
+        release_pid, release_output = run_process(
+            [
+                sys.executable,
+                "-m",
+                "comeback.cli",
+                "--db",
+                str(live_db),
+                "--repo",
+                str(ROOT),
+                "release",
+                "--session-id",
+                session_two,
+            ]
+        )
+        outcome = json.loads(release_output)
 
         session_three = "evolved-" + str(uuid.uuid4())
         evolved_pid, _ = hook(
@@ -323,6 +367,10 @@ def main() -> None:
             "session_one": {
                 "session_id": session_one,
                 "writer_pid": writer_pid,
+                "source_start_pid": source_start_pid,
+                "source_pretool_pid": source_pretool_pid,
+                "source_pretool_decision": decision(source_decision),
+                "source_context": source_context,
                 "lesson_id": lesson["lesson_id"],
                 "mode_after_intervention": lesson["current_mode"],
             },
@@ -342,14 +390,17 @@ def main() -> None:
             "unrelated_work": {"session_id": low_risk_session, "mode": low_risk_run["mode"]},
             "checkpoint": {
                 "before": decision(before_check),
-                "hook_result": check_result,
+                "capability_pid": checkpoint_pid,
+                "capability_result": json.loads(checkpoint_output),
                 "remaining_after_check": InterventionMemory.missing_requirements(run_after_check),
             },
             "authorization": {
                 "unauthorized": json.loads(unauthorized),
                 "authorized_pid": approval_pid,
                 "authorized_session": json.loads(approval_output)["session_id"],
-                "release_decision": decision(allowed),
+                "raw_release_decision": decision(raw_release),
+                "capability_decision": decision(allowed),
+                "release_pid": release_pid,
             },
             "outcome": outcome,
             "evolved_session": {

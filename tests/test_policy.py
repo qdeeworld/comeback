@@ -8,6 +8,7 @@ from comeback.policy import (
     invocation_matches,
     is_success_wrapped,
     is_release_action,
+    is_release_capability,
     mode_for_outcomes,
     tool_succeeded,
 )
@@ -19,6 +20,35 @@ def test_task_classification_keeps_unrelated_work_autonomous():
         "release",
         "release_workflow",
     )
+
+
+@pytest.mark.parametrize(
+    "prompt",
+    [
+        "Implement merge sort",
+        "Fix the production-only parser",
+        "Update the shipping copy",
+        "Write the release notes",
+        "Refactor the deployment configuration",
+    ],
+)
+def test_release_nouns_do_not_create_false_supervision_debt(prompt):
+    assert classify_task(prompt) == ("low_risk", "general")
+
+
+@pytest.mark.parametrize(
+    "prompt",
+    [
+        "Deploy.",
+        "Publish the package",
+        "Release this version",
+        "Merge this PR",
+        "Ship it",
+        "Please git push origin main",
+    ],
+)
+def test_explicit_release_intent_is_classified(prompt):
+    assert classify_task(prompt) == ("release", "release_workflow")
 
 
 def test_supervision_evolves_with_outcomes():
@@ -40,6 +70,8 @@ def test_supervision_evolves_with_outcomes():
         "env RELEASE=1 /bin/bash --noprofile -lc 'git push origin main'",
         "eval 'git push origin main'",
         "echo ready;git push origin main",
+        "echo ready\ngit push origin main",
+        "bash -c 'exec git push origin main'",
         "pnpm run deploy",
         "npm publish",
         "./node_modules/.bin/wrangler deploy",
@@ -127,6 +159,59 @@ def test_cd_prefix_cannot_substitute_another_repository(tmp_path):
     assert not is_success_wrapped(
         prefixed,
         "COMEBACK_CHECK_OK_123",
+        working_directory=tmp_path,
+    )
+
+
+@pytest.mark.parametrize("separator", ["&&", ";"])
+def test_same_repository_prefix_allows_only_the_session_release_capability(
+    tmp_path, separator
+):
+    expected = "/trusted/bin/comeback release --session-id expected"
+    command = (
+        f"cd {shlex.quote(str(tmp_path))} {separator} "
+        + expected
+    )
+    assert is_release_capability(
+        command,
+        expected,
+        working_directory=tmp_path,
+    )
+    assert not is_release_capability(
+        command,
+        "/trusted/bin/comeback release --session-id another-session",
+        working_directory=tmp_path,
+    )
+
+
+def test_release_capability_rejects_another_repository_prefix(tmp_path):
+    expected = "/trusted/bin/comeback release --session-id expected"
+    command = (
+        f"cd {shlex.quote(str(tmp_path / 'other'))} && "
+        + expected
+    )
+    assert not is_release_capability(
+        command,
+        expected,
+        working_directory=tmp_path,
+    )
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "./comeback release --session-id expected",
+        "/trusted/bin/comeback release --session-id expected --timeout 1",
+        "/trusted/bin/comeback release --session-id expected --session-id other",
+        "/trusted/bin/comeback release --session-id expected && git push",
+        "/trusted/bin/comeback release --session-id $(git push)",
+    ],
+)
+def test_release_capability_rejects_substitutes_and_extra_shell_input(tmp_path, command):
+    expected = "/trusted/bin/comeback release --session-id expected"
+    assert not is_release_capability(
+        command,
+        expected,
         working_directory=tmp_path,
     )
 
