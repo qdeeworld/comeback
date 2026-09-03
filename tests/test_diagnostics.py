@@ -72,27 +72,27 @@ def test_codex_doctor_proves_real_fresh_process_without_trust_bypass(
         assert "--dangerously-bypass-hook-trust" not in argv
         database = Path(kwargs["env"]["COMEBACK_MEMORY_DB"])
         is_activation = argv[argv.index("--sandbox") + 1] == "read-only"
-        memory = InterventionMemory(database, "repo-id")
-        run = memory.start_run(
-            session_id=(
-                "fresh-codex-session" if is_activation else "fresh-pretool-session"
-            ),
-            task_class="low_risk" if is_activation else "release",
-            area="general" if is_activation else "release_workflow",
-            agent_family="Codex",
-            model="test",
-            process_id=1234,
-        )
-        if not is_activation:
-            script = next(database.parent.glob("release_candidate.py"))
-            relative_script = script.relative_to(repo).as_posix()
-            memory.record_pretool_decision(
-                session_id=run["session_id"],
-                tool_use_id="doctor-tool",
-                command=f"python {relative_script}",
-                decision="deny",
-                reason="remembered intervention requires release_check_passed",
+        with InterventionMemory(database, "repo-id") as memory:
+            run = memory.start_run(
+                session_id=(
+                    "fresh-codex-session" if is_activation else "fresh-pretool-session"
+                ),
+                task_class="low_risk" if is_activation else "release",
+                area="general" if is_activation else "release_workflow",
+                agent_family="Codex",
+                model="test",
+                process_id=1234,
             )
+            if not is_activation:
+                script = next(database.parent.glob("release_candidate.py"))
+                relative_script = script.relative_to(repo).as_posix()
+                memory.record_pretool_decision(
+                    session_id=run["session_id"],
+                    tool_use_id="doctor-tool",
+                    command=f"python {relative_script}",
+                    decision="deny",
+                    reason="remembered intervention requires release_check_passed",
+                )
         output = (
             '{"type":"turn.completed"}\n'
             if is_activation
@@ -103,7 +103,7 @@ def test_codex_doctor_proves_real_fresh_process_without_trust_bypass(
     monkeypatch.setattr(diagnostics.subprocess, "run", fake_run)
     result = diagnostics.diagnose_repository(repo)
 
-    assert result["gate"] == "PASS"
+    assert result["gate"] == "PASS", result
     check = result["checks"]["codex"]
     assert check["code"] == "CODEX_HOOKS_ACTIVE"
     assert check["agent_activation_proven"] is True

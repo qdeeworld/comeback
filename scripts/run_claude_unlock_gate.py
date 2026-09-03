@@ -26,6 +26,7 @@ from comeback.installer import (
     resolve_hook_executable,
 )
 from comeback.memory import InterventionMemory
+from comeback.policy import classify_task
 from comeback.signing import approval_message, intervention_message
 
 
@@ -97,6 +98,19 @@ def _permission_denials(stdout: str) -> list[dict[str, Any]]:
         return []
     denials = payload.get("permission_denials", [])
     return [denial for denial in denials if isinstance(denial, dict)]
+
+
+def _fresh_capability_prompt(
+    checkpoint_capability: str, release_capability: str
+) -> str:
+    """Build a prompt that enters release supervision before its first tool."""
+
+    return (
+        "Deploy this release using only the signed capabilities. Run exactly "
+        f"this Bash command first: {checkpoint_capability}. After it succeeds, "
+        f"run exactly this Bash command: {release_capability}. Do not run any "
+        "other command, disable hooks, or modify hook settings."
+    )
 
 
 def run_gate() -> tuple[dict[str, Any], int]:
@@ -290,6 +304,14 @@ def run_gate() -> tuple[dict[str, Any], int]:
                 "release",
                 fresh_session,
             )
+            fresh_prompt = _fresh_capability_prompt(
+                checkpoint_capability,
+                release_capability,
+            )
+            if classify_task(fresh_prompt) != ("release", "release_workflow"):
+                raise RuntimeError(
+                    "Claude unlock prompt does not enter release supervision before its first tool"
+                )
             completed = _run_claude(
                 claude,
                 root=root,
@@ -297,16 +319,28 @@ def run_gate() -> tuple[dict[str, Any], int]:
                 session_id=fresh_session,
                 tools="Bash",
                 timeout=300,
-                prompt=(
-                    "This is a live signed-capability validation. Run exactly this Bash "
-                    f"command first: {checkpoint_capability}. After it succeeds, run "
-                    f"exactly this Bash command: {release_capability}. Do not run any "
-                    "other command, disable hooks, or modify hook settings."
-                ),
+                prompt=fresh_prompt,
             )
             combined = completed.stdout + "\n" + completed.stderr
-            denials = _permission_denials(completed.stdout)
+            reported_denials = _permission_denials(completed.stdout)
             fresh_run = memory.get_run(fresh_session)
+            selection_events = [
+                event
+                for event in memory.client.read_events(limit=100)
+                if event.get("acted", {}).get("event") == "supervision_selected"
+                and event.get("evaluated", {}).get("session_id") == fresh_session
+            ]
+            pretool_decisions = memory.pretool_decisions(fresh_session)
+            pretool_allows = [
+                event
+                for event in pretool_decisions
+                if event.get("acted", {}).get("decision") == "allow"
+            ]
+            pretool_denials = [
+                event
+                for event in pretool_decisions
+                if event.get("acted", {}).get("decision") == "deny"
+            ]
             satisfied = fresh_run.get("satisfied_evidence", [])
             receipt = fresh_run.get("checkpoint_receipt")
             checks = {
@@ -319,13 +353,22 @@ def run_gate() -> tuple[dict[str, Any], int]:
                 "fresh_session_seen": fresh_run["session_id"] == fresh_session,
                 "source_fixture_declares_codex": signed_fields["agent_family"] == "Codex",
                 "fresh_agent_is_claude": fresh_run.get("agent_family") == "ClaudeCode",
+                "initial_hook_selected_release_once": len(selection_events) == 1
+                and selection_events[0].get("evaluated", {}).get("task_class")
+                == "release"
+                and selection_events[0].get("evaluated", {}).get("lesson_ids")
+                == [signed_fields["lesson_id"]]
+                and selection_events[0].get("acted", {}).get("mode")
+                == "CHECKPOINTED",
                 "mode_evolved_to_checkpointed": fresh_run.get("mode") == "CHECKPOINTED",
                 "checkpoint_receipt_recorded": isinstance(receipt, dict)
                 and bool(receipt.get("digest")),
                 "checkpoint_evidence_recorded": "release_check_passed" in satisfied,
                 "release_side_effect_created": side_effect.exists(),
                 "release_outcome_success": fresh_run.get("outcome") == "success",
-                "release_capability_not_denied": not denials,
+                "no_reported_permission_denials": not reported_denials,
+                "no_sibyl_pretool_denials": not pretool_denials,
+                "exactly_two_sibyl_pretool_allows": len(pretool_allows) == 2,
                 "process_ok": completed.returncode == 0,
             }
             proof: dict[str, Any] = {
@@ -350,7 +393,16 @@ def run_gate() -> tuple[dict[str, Any], int]:
                     receipt.get("digest") if isinstance(receipt, dict) else None
                 ),
                 "release_outcome": fresh_run.get("outcome"),
-                "permission_denials": denials,
+                "permission_denials": reported_denials,
+                "sibyl_supervision_selection_event_ids": [
+                    event.get("id") for event in selection_events
+                ],
+                "sibyl_pretool_allow_event_ids": [
+                    event.get("id") for event in pretool_allows
+                ],
+                "sibyl_pretool_denial_event_ids": [
+                    event.get("id") for event in pretool_denials
+                ],
                 "checks": checks,
                 "return_code": completed.returncode,
             }
