@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 from eth_account import Account
@@ -9,6 +10,18 @@ from eth_account.messages import encode_defunct
 from comeback.identity import repository_identity
 from comeback.memory import InterventionMemory, MemoryIntegrityError
 from comeback.signing import intervention_message
+
+
+def test_context_manager_closes_sibyl_storage(tmp_path: Path) -> None:
+    memory = InterventionMemory(tmp_path / "memory.db", "repo-a")
+    close = Mock(wraps=memory.client.storage.close)
+    memory.client.storage.close = close
+
+    with memory as selected:
+        assert selected is memory
+        selected.list_runs()
+
+    close.assert_called_once_with()
 
 
 def record_with_source(memory: InterventionMemory, record: dict) -> dict:

@@ -170,10 +170,13 @@ if os.name == "nt":
         ready = tmp_path / "runner.ready"
         start = tmp_path / "runner.start"
         late_marker = tmp_path / "late.txt"
+        grandchild_code = (
+            "import time; from pathlib import Path; time.sleep(2); "
+            f"Path({str(late_marker)!r}).write_text('late')"
+        )
         target_code = (
             "import subprocess,sys; "
-            "subprocess.Popen([sys.executable, '-c', "
-            f"\"import time; from pathlib import Path; time.sleep(2); Path({str(late_marker)!r}).write_text('late')\"]); "
+            f"subprocess.Popen([sys.executable, '-c', {grandchild_code!r}]); "
             "raise SystemExit(0)"
         )
         process = subprocess.Popen(
@@ -208,11 +211,14 @@ if os.name == "nt":
         start = tmp_path / "runner.start"
         child_ready = tmp_path / "child.ready"
         late_marker = tmp_path / "late.txt"
+        grandchild_code = (
+            "import time; from pathlib import Path; time.sleep(2); "
+            f"Path({str(late_marker)!r}).write_text('late')"
+        )
         child_code = (
             "import subprocess,sys,time; from pathlib import Path; "
             f"Path({str(child_ready)!r}).write_text('ready'); "
-            "subprocess.Popen([sys.executable, '-c', "
-            f"\"import time; from pathlib import Path; time.sleep(2); Path({str(late_marker)!r}).write_text('late')\"]); "
+            f"subprocess.Popen([sys.executable, '-c', {grandchild_code!r}]); "
             "time.sleep(30)"
         )
         process = subprocess.Popen(

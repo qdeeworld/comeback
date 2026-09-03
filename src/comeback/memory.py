@@ -655,6 +655,23 @@ class InterventionMemory:
         self.db_path = Path(db_path).expanduser().resolve()
         self.client = MemoryClient.local(self.db_path, tenant_id=tenant_id(repo_id))
 
+    def close(self) -> None:
+        """Release Sibyl's cached SQLite handles deterministically.
+
+        Windows does not permit a temporary directory to be removed while its
+        SQLite database or WAL is still open.  Diagnostic probes deliberately
+        create short-lived stores, so relying on garbage collection would turn
+        a successful hook check into a platform-specific cleanup failure.
+        """
+
+        self.client.storage.close()
+
+    def __enter__(self) -> "InterventionMemory":
+        return self
+
+    def __exit__(self, _exc_type, _exc, _traceback) -> None:
+        self.close()
+
     @contextmanager
     def _mutation_lock(self):
         lock_path = self.db_path.parent / f"memory-{self.repo_id}.lock"

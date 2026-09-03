@@ -436,7 +436,8 @@ def _run_codex_activation_probe(
                 },
             ) from exc
 
-        runs = InterventionMemory(database, repo_id).list_runs()
+        with InterventionMemory(database, repo_id) as memory:
+            runs = memory.list_runs()
         activation = {
             "fresh_process": True,
             "ephemeral_session": True,
@@ -512,7 +513,6 @@ def _run_codex_pretool_probe(
             encoding="utf-8",
         )
         relative_script = script.relative_to(root).as_posix()
-        memory = InterventionMemory(database, repo_id)
         owner = Account.create()
         source_session = "doctor-source-" + uuid.uuid4().hex
         signed_fields = {
@@ -538,24 +538,25 @@ def _run_codex_pretool_probe(
             "source_session_id": source_session,
             "incident_at": datetime.now(timezone.utc).isoformat(),
         }
-        memory.start_run(
-            session_id=source_session,
-            task_class="release",
-            area="release_workflow",
-            agent_family="Codex",
-            model="comeback-doctor-source",
-        )
-        signature = Account.sign_message(
-            encode_defunct(text=intervention_message(signed_fields)),
-            private_key=owner.key,
-        ).signature.hex()
-        memory.record_intervention(
-            {
-                "signed_fields": signed_fields,
-                "intervention_signature": signature,
-                "incident_summary": "Comeback doctor disposable release denial.",
-            }
-        )
+        with InterventionMemory(database, repo_id) as memory:
+            memory.start_run(
+                session_id=source_session,
+                task_class="release",
+                area="release_workflow",
+                agent_family="Codex",
+                model="comeback-doctor-source",
+            )
+            signature = Account.sign_message(
+                encode_defunct(text=intervention_message(signed_fields)),
+                private_key=owner.key,
+            ).signature.hex()
+            memory.record_intervention(
+                {
+                    "signed_fields": signed_fields,
+                    "intervention_signature": signature,
+                    "incident_summary": "Comeback doctor disposable release denial.",
+                }
+            )
 
         environment = os.environ.copy()
         environment["COMEBACK_MEMORY_DB"] = str(database)
@@ -598,21 +599,22 @@ def _run_codex_pretool_probe(
             ) from exc
 
         combined = completed.stdout + "\n" + completed.stderr
-        runs = memory.list_runs(limit=10)
-        # The probe seeds one real-looking source run so the signed intervention
-        # has provenance.  The proof must select the *new* Codex lifecycle run,
-        # not count that fixture as a second ambiguous release session.
-        release_runs = [
-            run
-            for run in runs
-            if run.get("task_class") == "release"
-            and run.get("session_id") != source_session
-        ]
-        decisions = (
-            memory.pretool_decisions(release_runs[0]["session_id"])
-            if len(release_runs) == 1
-            else []
-        )
+        with InterventionMemory(database, repo_id) as memory:
+            runs = memory.list_runs(limit=10)
+            # The probe seeds one real-looking source run so the signed intervention
+            # has provenance.  The proof must select the *new* Codex lifecycle run,
+            # not count that fixture as a second ambiguous release session.
+            release_runs = [
+                run
+                for run in runs
+                if run.get("task_class") == "release"
+                and run.get("session_id") != source_session
+            ]
+            decisions = (
+                memory.pretool_decisions(release_runs[0]["session_id"])
+                if len(release_runs) == 1
+                else []
+            )
         denials = [
             event
             for event in decisions
@@ -735,7 +737,8 @@ def diagnose_repository(repo: str | Path, *, agents: tuple[str, ...] = ("codex",
                         session_id=session_id,
                         temporary=temporary,
                     )
-                    run = InterventionMemory(database, repo_id).get_run(session_id)
+                    with InterventionMemory(database, repo_id) as memory:
+                        run = memory.get_run(session_id)
                 checks[agent] = {
                     "gate": "PARTIAL",
                     "code": "CLAUDE_LAUNCHER_ONLY",

@@ -1,5 +1,6 @@
 import io
 import json
+import shlex
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -68,10 +69,11 @@ def test_post_tool_text_cannot_forge_checkpoint_evidence(tmp_path: Path, monkeyp
         {**common, "hook_event_name": "UserPromptSubmit", "prompt": "Deploy this release."}
     )
     context = recalled["hookSpecificOutput"]["additionalContext"]
-    assert f"--db {db.resolve()}" in context
     exact_checkpoint = context.split("Checkpoint capability: ", 1)[1].split(
         ". Release capability:", 1
     )[0]
+    checkpoint_words = shlex.split(exact_checkpoint, posix=True)
+    assert checkpoint_words[checkpoint_words.index("--db") + 1] == str(db.resolve())
     allowed_checkpoint = handle(
         {
             **common,
