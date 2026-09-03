@@ -119,6 +119,7 @@ def _pretool_result(
     memory: InterventionMemory,
     event: dict[str, Any],
     *,
+    action_kind: str,
     decision: str,
     reason: str,
 ) -> dict[str, Any]:
@@ -126,6 +127,7 @@ def _pretool_result(
         session_id=str(event["session_id"]),
         tool_use_id=str(event.get("tool_use_id", "unknown")),
         command=command_from_event(event),
+        action_kind=action_kind,
         decision=decision,
         reason=reason,
     )
@@ -211,6 +213,19 @@ def handle(event: dict[str, Any]) -> dict[str, Any] | None:
         or comeback_action is not None
         or configured_raw_action
     ):
+        action_kind = (
+            "checkpoint_capability"
+            if exact_checkpoint
+            else (
+                "release_capability"
+                if exact_release
+                else (
+                    "noncanonical_capability"
+                    if comeback_action is not None
+                    else "raw_release"
+                )
+            )
+        )
         try:
             run = preliminary_run or memory.get_run(session_id)
         except MemoryIntegrityError as exc:
@@ -219,6 +234,7 @@ def handle(event: dict[str, Any]) -> dict[str, Any] | None:
             return _pretool_result(
                 memory,
                 event,
+                action_kind=action_kind,
                 decision="deny",
                 reason=(
                     f"Comeback session is already {run['status']}; start a genuinely fresh "
@@ -231,6 +247,7 @@ def handle(event: dict[str, Any]) -> dict[str, Any] | None:
             return _pretool_result(
                 memory,
                 event,
+                action_kind=action_kind,
                 decision="deny",
                 reason=f"Comeback fail-closed: {exc}",
             )
@@ -252,6 +269,7 @@ def handle(event: dict[str, Any]) -> dict[str, Any] | None:
                 return _pretool_result(
                     memory,
                     event,
+                    action_kind=action_kind,
                     decision="deny",
                     reason="Comeback has no signed checkpoint capability for this session.",
                 )
@@ -259,6 +277,7 @@ def handle(event: dict[str, Any]) -> dict[str, Any] | None:
                 return _pretool_result(
                     memory,
                     event,
+                    action_kind=action_kind,
                     decision="deny",
                     reason=(
                         "Comeback requires its exact signed checkpoint capability. Run exactly: "
@@ -268,6 +287,7 @@ def handle(event: dict[str, Any]) -> dict[str, Any] | None:
             return _pretool_result(
                 memory,
                 event,
+                action_kind=action_kind,
                 decision="allow",
                 reason=f"Comeback {run['mode']}: exact checkpoint capability allowed.",
             )
@@ -275,6 +295,7 @@ def handle(event: dict[str, Any]) -> dict[str, Any] | None:
             return _pretool_result(
                 memory,
                 event,
+                action_kind=action_kind,
                 decision="deny",
                 reason="Comeback refuses combined or ambiguous capability invocations.",
             )
@@ -283,6 +304,7 @@ def handle(event: dict[str, Any]) -> dict[str, Any] | None:
             return _pretool_result(
                 memory,
                 event,
+                action_kind=action_kind,
                 decision="deny",
                 reason=(
                     f"Comeback {run['mode']}: remembered intervention requires "
@@ -294,6 +316,7 @@ def handle(event: dict[str, Any]) -> dict[str, Any] | None:
             return _pretool_result(
                 memory,
                 event,
+                action_kind=action_kind,
                 decision="deny",
                 reason=(
                     "Comeback requires its signed, one-shot release capability. Run exactly: "
@@ -303,6 +326,7 @@ def handle(event: dict[str, Any]) -> dict[str, Any] | None:
         return _pretool_result(
             memory,
             event,
+            action_kind=action_kind,
             decision="allow",
             reason=f"Comeback {run['mode']}: release gate satisfied.",
         )

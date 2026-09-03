@@ -90,6 +90,7 @@ def test_codex_doctor_proves_real_fresh_process_without_trust_bypass(
                     session_id=run["session_id"],
                     tool_use_id="doctor-tool",
                     command=f"python {relative_script}",
+                    action_kind="raw_release",
                     decision="deny",
                     reason="remembered intervention requires release_check_passed",
                 )

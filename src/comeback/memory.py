@@ -944,11 +944,19 @@ class InterventionMemory:
         session_id: str,
         tool_use_id: str,
         command: str,
+        action_kind: str,
         decision: str,
         reason: str,
     ) -> str:
         if decision not in {"allow", "deny"}:
             raise MemoryIntegrityError("pretool decision is invalid")
+        if action_kind not in {
+            "checkpoint_capability",
+            "release_capability",
+            "noncanonical_capability",
+            "raw_release",
+        }:
+            raise MemoryIntegrityError("pretool action kind is invalid")
         # Requiring an existing run binds this evidence to UserPromptSubmit and
         # prevents a standalone/manual hook invocation from fabricating a full
         # lifecycle proof.
@@ -958,6 +966,7 @@ class InterventionMemory:
                 "session_id": session_id,
                 "tool_use_id": tool_use_id,
                 "command_sha256": hashlib.sha256(command.encode()).hexdigest(),
+                "action_kind": action_kind,
                 "mode": run["mode"],
             },
             acted={"event": "pretool_decision", "decision": decision},

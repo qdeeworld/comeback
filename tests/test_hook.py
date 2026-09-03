@@ -86,6 +86,9 @@ def test_post_tool_text_cannot_forge_checkpoint_evidence(tmp_path: Path, monkeyp
     assert "exact checkpoint capability allowed" in allowed_checkpoint[
         "hookSpecificOutput"
     ]["additionalContext"]
+    assert memory.pretool_decisions("fresh-session")[-1]["evaluated"][
+        "action_kind"
+    ] == "checkpoint_capability"
     alternate_checkpoint = handle(
         {
             **common,

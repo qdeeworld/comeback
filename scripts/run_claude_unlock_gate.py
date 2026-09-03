@@ -92,12 +92,16 @@ def _run_claude(
 def _permission_denials(stdout: str) -> list[dict[str, Any]]:
     try:
         payload = json.loads(stdout)
-    except json.JSONDecodeError:
-        return []
+    except json.JSONDecodeError as exc:
+        raise ValueError("Claude did not return valid JSON") from exc
     if not isinstance(payload, dict):
-        return []
-    denials = payload.get("permission_denials", [])
-    return [denial for denial in denials if isinstance(denial, dict)]
+        raise ValueError("Claude JSON response is not an object")
+    denials = payload.get("permission_denials")
+    if not isinstance(denials, list) or not all(
+        isinstance(denial, dict) for denial in denials
+    ):
+        raise ValueError("Claude JSON response has invalid permission_denials")
+    return list(denials)
 
 
 def _fresh_capability_prompt(
@@ -111,6 +115,30 @@ def _fresh_capability_prompt(
         f"run exactly this Bash command: {release_capability}. Do not run any "
         "other command, disable hooks, or modify hook settings."
     )
+
+
+def _allowed_action_kinds(decisions: list[dict[str, Any]]) -> list[str]:
+    values = [
+        event.get("evaluated", {}).get("action_kind")
+        for event in decisions
+        if event.get("acted", {}).get("decision") == "allow"
+    ]
+    if not all(isinstance(value, str) for value in values):
+        return []
+    return sorted(values)
+
+
+def _valid_sibyl_capability_trace(decisions: list[dict[str, Any]]) -> bool:
+    denied = [
+        event
+        for event in decisions
+        if event.get("acted", {}).get("decision") == "deny"
+    ]
+    allowed_kinds = _allowed_action_kinds(decisions)
+    return not denied and allowed_kinds == [
+        "checkpoint_capability",
+        "release_capability",
+    ]
 
 
 def run_gate() -> tuple[dict[str, Any], int]:
@@ -341,6 +369,7 @@ def run_gate() -> tuple[dict[str, Any], int]:
                 for event in pretool_decisions
                 if event.get("acted", {}).get("decision") == "deny"
             ]
+            allowed_action_kinds = _allowed_action_kinds(pretool_decisions)
             satisfied = fresh_run.get("satisfied_evidence", [])
             receipt = fresh_run.get("checkpoint_receipt")
             checks = {
@@ -368,7 +397,11 @@ def run_gate() -> tuple[dict[str, Any], int]:
                 "release_outcome_success": fresh_run.get("outcome") == "success",
                 "no_reported_permission_denials": not reported_denials,
                 "no_sibyl_pretool_denials": not pretool_denials,
-                "exactly_two_sibyl_pretool_allows": len(pretool_allows) == 2,
+                "sibyl_allowed_checkpoint_then_release": allowed_action_kinds
+                == ["checkpoint_capability", "release_capability"],
+                "sibyl_capability_trace_valid": _valid_sibyl_capability_trace(
+                    pretool_decisions
+                ),
                 "process_ok": completed.returncode == 0,
             }
             proof: dict[str, Any] = {
@@ -400,6 +433,7 @@ def run_gate() -> tuple[dict[str, Any], int]:
                 "sibyl_pretool_allow_event_ids": [
                     event.get("id") for event in pretool_allows
                 ],
+                "sibyl_pretool_allowed_action_kinds": allowed_action_kinds,
                 "sibyl_pretool_denial_event_ids": [
                     event.get("id") for event in pretool_denials
                 ],
