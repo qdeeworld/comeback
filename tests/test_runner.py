@@ -32,12 +32,12 @@ def _open_runner_barrier(path: Path, token: str) -> None:
 
 
 def _publish_adversarial_barrier(path: Path, payload: bytes) -> None:
-    """Atomically publish bytes that the trusted producer would never emit."""
+    """Publish complete adversarial bytes with the production hard-link primitive."""
 
     temporary = path.with_name(f".{path.name}.adversarial.tmp")
     try:
         temporary.write_bytes(payload)
-        os.replace(temporary, path)
+        os.link(temporary, path)
     finally:
         temporary.unlink(missing_ok=True)
 
@@ -98,6 +98,7 @@ def test_runner_cannot_execute_target_before_start_barrier(tmp_path: Path):
         b"expected\r\n",
         b"expected",
         b"expected\nextra\n",
+        b"",
     ],
 )
 def test_runner_rejects_noncanonical_start_token(
@@ -132,39 +133,6 @@ def test_runner_rejects_noncanonical_start_token(
         if process.poll() is None:
             process.kill()
             process.wait(timeout=10)
-
-
-def test_runner_rejects_visible_empty_start_barrier(tmp_path: Path):
-    ready = tmp_path / "runner.ready"
-    start = tmp_path / "runner.start"
-    marker = tmp_path / "target-ran.txt"
-    process = subprocess.Popen(
-        _runner_command(
-            ready,
-            start,
-            "expected",
-            [
-                sys.executable,
-                "-c",
-                f"from pathlib import Path; Path({str(marker)!r}).write_text('ran')",
-            ],
-        ),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
-    try:
-        _wait_for(ready)
-        start.touch()
-        _, stderr = process.communicate(timeout=20)
-        assert process.returncode == 126
-        assert "start barrier token is invalid" in stderr
-        assert not marker.exists()
-    finally:
-        if process.poll() is None:
-            process.kill()
-            process.wait(timeout=10)
-
 
 def test_ready_record_retries_partial_writes(tmp_path: Path, monkeypatch) -> None:
     from comeback import runner
