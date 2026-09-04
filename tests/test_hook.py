@@ -6,13 +6,14 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+import pytest
 from eth_account import Account
 from eth_account.messages import encode_defunct
 
 from comeback.base_trust import BaseTrustError
 from comeback.hook import handle, main
 from comeback.identity import repository_identity
-from comeback.memory import InterventionMemory
+from comeback.memory import InterventionMemory, MemoryIntegrityError
 from comeback.signing import intervention_message
 
 
@@ -70,6 +71,56 @@ def _source_run(
         agent_family=agent_family,
         model="test-source",
     )
+
+
+def test_handle_closes_sibyl_storage_after_success(tmp_path: Path, monkeypatch) -> None:
+    database = tmp_path / "memory.db"
+    monkeypatch.setenv("COMEBACK_MEMORY_DB", str(database))
+    closed: list[Path] = []
+
+    class TrackingMemory(InterventionMemory):
+        def close(self) -> None:
+            closed.append(self.db_path)
+            super().close()
+
+    monkeypatch.setattr("comeback.hook.InterventionMemory", TrackingMemory)
+
+    result = handle(
+        {
+            "session_id": "storage-success",
+            "cwd": str(tmp_path),
+            "model": "test",
+            "hook_event_name": "UserPromptSubmit",
+            "prompt": "Read the repository documentation.",
+        }
+    )
+
+    assert result is not None
+    assert closed == [database.resolve()]
+
+
+def test_handle_closes_sibyl_storage_after_error(tmp_path: Path, monkeypatch) -> None:
+    database = tmp_path / "memory.db"
+    monkeypatch.setenv("COMEBACK_MEMORY_DB", str(database))
+    closed: list[Path] = []
+
+    class TrackingMemory(InterventionMemory):
+        def close(self) -> None:
+            closed.append(self.db_path)
+            super().close()
+
+    monkeypatch.setattr("comeback.hook.InterventionMemory", TrackingMemory)
+
+    with pytest.raises(MemoryIntegrityError, match="hook event has no session identity"):
+        handle(
+            {
+                "cwd": str(tmp_path),
+                "hook_event_name": "UserPromptSubmit",
+                "prompt": "Read the repository documentation.",
+            }
+        )
+
+    assert closed == [database.resolve()]
 
 
 def test_post_tool_text_cannot_forge_checkpoint_evidence(tmp_path: Path, monkeypatch):

@@ -141,20 +141,14 @@ def _pretool_result(
     }
 
 
-def handle(event: dict[str, Any]) -> dict[str, Any] | None:
-    cwd = event.get("cwd") or os.getcwd()
-    repository = repository_configuration(str(cwd))
-    root, repo_id = repository.root, repository.repo_id
-    database = _database(root, event)
-    # Every capability instruction carries the same absolute database chosen
-    # for this lifecycle event. The agent cannot silently switch to the CLI's
-    # default store between recall and enforcement.
-    event["_comeback_memory_db"] = str(database)
-    memory = InterventionMemory(
-        database,
-        repo_id,
-        base_trust=repository.base_trust,
-    )
+def _handle_event(
+    event: dict[str, Any],
+    *,
+    root: Path,
+    memory: InterventionMemory,
+) -> dict[str, Any] | None:
+    """Process one lifecycle event using an already-owned memory handle."""
+
     session_id = str(event.get("session_id", ""))
     event_name = event.get("hook_event_name")
 
@@ -367,6 +361,23 @@ def handle(event: dict[str, Any]) -> dict[str, Any] | None:
             )
             return _block_stop(reason, event)
     return None
+
+
+def handle(event: dict[str, Any]) -> dict[str, Any] | None:
+    cwd = event.get("cwd") or os.getcwd()
+    repository = repository_configuration(str(cwd))
+    root, repo_id = repository.root, repository.repo_id
+    database = _database(root, event)
+    # Every capability instruction carries the same absolute database chosen
+    # for this lifecycle event. The agent cannot silently switch to the CLI's
+    # default store between recall and enforcement.
+    event["_comeback_memory_db"] = str(database)
+    with InterventionMemory(
+        database,
+        repo_id,
+        base_trust=repository.base_trust,
+    ) as memory:
+        return _handle_event(event, root=root, memory=memory)
 
 
 def main() -> None:
