@@ -14,6 +14,30 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  base-trust-anchor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: contracts
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@908c540300062bd5a7e473851cdb4282204cee09 # v1
+        with:
+          version: v1.7.1
+          cache: false
+
+      - name: Check formatting
+        run: forge fmt --check
+
+      - name: Build and test trust anchor
+        run: |
+          forge build --sizes
+          forge test -vvv
+
   fresh-session-memory-gate:
     strategy:
       fail-fast: false
