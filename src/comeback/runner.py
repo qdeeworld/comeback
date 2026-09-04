@@ -11,6 +11,9 @@ from pathlib import Path
 
 _WINDOWS_JOB_SETTLE_SECONDS = 0.5
 _WINDOWS_JOB_SETTLE_INTERVAL_SECONDS = 0.01
+_ATOMIC_WRITE_FLAGS = (
+    os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_BINARY", 0)
+)
 
 
 def _write_all(descriptor: int, payload: bytes) -> None:
@@ -27,7 +30,7 @@ def _write_all(descriptor: int, payload: bytes) -> None:
 
 def _write_ready(path: Path) -> None:
     temporary = path.with_suffix(path.suffix + ".tmp")
-    descriptor = os.open(temporary, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    descriptor = os.open(temporary, _ATOMIC_WRITE_FLAGS, 0o600)
     try:
         try:
             _write_all(

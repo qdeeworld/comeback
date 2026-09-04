@@ -79,7 +79,7 @@ def test_runner_cannot_execute_target_before_start_barrier(tmp_path: Path):
             process.wait(timeout=10)
 
 
-@pytest.mark.parametrize("published_token", ["wrong", " expected "])
+@pytest.mark.parametrize("published_token", ["wrong", " expected ", "expected\r"])
 def test_runner_rejects_noncanonical_start_token(
     tmp_path: Path, published_token: str
 ):
@@ -162,9 +162,10 @@ def test_ready_record_retries_partial_writes(tmp_path: Path, monkeypatch) -> Non
 
     runner._write_ready(ready)
 
-    assert json.loads(ready.read_text(encoding="utf-8")) == {
-        "process_id": os.getpid()
-    }
+    ready_bytes = ready.read_bytes()
+    assert ready_bytes.endswith(b"\n")
+    assert b"\r" not in ready_bytes
+    assert json.loads(ready_bytes) == {"process_id": os.getpid()}
     assert writes > 1
     assert not ready.with_suffix(ready.suffix + ".tmp").exists()
 

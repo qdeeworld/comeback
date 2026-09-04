@@ -20,6 +20,11 @@ from .memory import (
 from .signing import action_spec_digest, checkpoint_receipt_digest
 
 
+_ATOMIC_WRITE_FLAGS = (
+    os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_BINARY", 0)
+)
+
+
 def _result(completed: subprocess.CompletedProcess[str], run: dict[str, Any]) -> dict[str, Any]:
     return {
         "session_id": run["session_id"],
@@ -576,7 +581,7 @@ def _publish_lock(path: Path, record: dict[str, Any]) -> None:
     """Publish a complete lock atomically without an empty O_EXCL window."""
 
     temporary = path.with_name(f".{path.name}.{record['nonce']}.tmp")
-    descriptor = os.open(temporary, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    descriptor = os.open(temporary, _ATOMIC_WRITE_FLAGS, 0o600)
     try:
         try:
             _write_all(
@@ -616,7 +621,7 @@ def _update_release_lock(
         raise MemoryIntegrityError("release lock changed during capability execution")
     updated = {**current, **changes}
     temporary = path.with_name(f".{path.name}.{current['nonce']}.update")
-    descriptor = os.open(temporary, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    descriptor = os.open(temporary, _ATOMIC_WRITE_FLAGS, 0o600)
     try:
         try:
             _write_all(
@@ -892,7 +897,7 @@ def _wait_for_runner_ready(
 
 def _open_start_barrier(path: Path, nonce: str) -> None:
     temporary = path.with_name(f".{path.name}.{nonce}.tmp")
-    descriptor = os.open(temporary, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    descriptor = os.open(temporary, _ATOMIC_WRITE_FLAGS, 0o600)
     try:
         try:
             _write_all(descriptor, (nonce + "\n").encode("utf-8"))
