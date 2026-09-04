@@ -144,7 +144,7 @@ Create the repository owner once:
 comeback create-owner
 ```
 
-Run owner, signing, approval, and reconciliation commands yourself in a native terminal—not through the coding agent. `comeback create-owner` asks you to enter and confirm a new password. That password encrypts only `.comeback/owner-keystore.json`, the local key used to sign interventions, approvals, and reconciliations. It is not a Sibyl password, Codex password, funded wallet password, or Base transaction password. The generated address does not need ETH.
+Run owner, signing, approval, and reconciliation commands yourself in a native terminal—not through the coding agent. `comeback create-owner` asks you to enter and confirm a new password. That password encrypts only `.comeback/owner-keystore.json`, which holds the local owner key used to sign interventions, approvals, and reconciliations. When Base trust is enabled, the same owner key can also sign and send the repository's Base transactions, and its address must hold enough Base Sepolia ETH for those transactions. The password is not a Sibyl or Codex password, does not hold funds by itself, and is never sent to Base.
 
 Prepare one intervention using commands that can execute directly without `&&`, pipes, redirection, or a shell interpreter. Store the prepared record inside ignored `.comeback/` so it does not make the checkpoint dirty. For a real Git release, use a direct HTTPS URL with no embedded username or token. For credential-free local validation, use the absolute path to a disposable bare repository. In both cases use an explicit source-to-destination refspec; do not sign a mutable remote name such as `origin`.
 
@@ -221,7 +221,7 @@ Run only the line matching the verified external state. Comeback shows the prior
 
 Sibyl is the only store for repository-specific intervention lessons, signed action specifications, supervision runs, checkpoint receipts, approvals, and outcomes. The hook contains generic classification and enforcement mechanics but no copied intervention or current supervision mode.
 
-Remove Sibyl state and the same fresh release request becomes `AUTONOMOUS`: its task-specific checkpoint and approval disappear. With memory enabled, the earlier intervention changes a fresh process from executing the raw release to denying it and requiring the remembered capabilities.
+Without active Base trust, remove Sibyl state and the same fresh release request becomes `AUTONOMOUS`: its task-specific checkpoint and approval disappear. With an active Base anchor, removing Sibyl instead makes the protected release fail closed because the committed anchor requires the missing initial intervention. In both configurations, deleting Sibyl destroys the product's adaptive supervision: Comeback can no longer derive the remembered requirements or evolve autonomy from prior outcomes. With memory enabled, the earlier intervention changes a fresh process from executing the raw release to denying it and requiring the remembered capabilities.
 
 The main call sites are:
 
@@ -232,13 +232,45 @@ The main call sites are:
 - action execution: `src/comeback/execution.py`
 - lifecycle enforcement: `src/comeback/hook.py`, `handle`
 
+## Optional Base Sepolia owner anchor
+
+Comeback's bounded Base integration answers one question: which wallet claimed the owner-specific anchor selected by this repository and activated its first Sibyl intervention? It does not move the adaptive memory onchain.
+
+Sibyl remains the only store for intervention content, task classification, signed action specifications, run history, checkpoint receipts, approvals, outcomes, and the evolving `HUMAN_REQUIRED`, `CHECKPOINTED`, and `AUTONOMOUS` modes. Base Sepolia stores only the selected owner address and, after activation, one initial Sibyl intervention identifier. That identifier is the SHA-256 digest of the exact domain-separated, canonical payload the owner signed, so it commits the initial checkpoint, release action, state policy, scope, provenance, and authority—not merely a session name. Activation refuses the older coordinates-only identifier format. If the committed configuration requires an active Base anchor but that exact incident is missing, corrupt, substituted, or has an invalid signature in Sibyl, Comeback fails the protected release closed. A Base or RPC failure also blocks a protected release; unrelated low-risk work does not require a Base call and remains available.
+
+The deployed immutable registry is [`0xe3C2D2A801904fa8c0d6C4456A6BEc853DfcFfDA`](https://sepolia.basescan.org/address/0xe3C2D2A801904fa8c0d6C4456A6BEc853DfcFfDA) on Base Sepolia (chain ID `84532`). It has no administrator, proxy, owner rotation, payable entry point, or external call. Its deployment transaction is [`0xc8680aa5d09a20d9cb5afd3d24b665fcb71e2fc3a36729b93669e7b2afedf2c6`](https://sepolia.basescan.org/tx/0xc8680aa5d09a20d9cb5afd3d24b665fcb71e2fc3a36729b93669e7b2afedf2c6), and [Sourcify reports an exact source match](https://repo.sourcify.dev/84532/0xe3C2D2A801904fa8c0d6C4456A6BEc853DfcFfDA). The expected runtime bytecode hash is `0xa28c086af9980458acb83e005846259ea3cf3402320710d271188327d1922c81`.
+
+Enable the anchor only after the normal repository identity is committed. The least confusing path is to pass the schema-1 Codex doctor first and record exactly one owner-signed Sibyl intervention before claiming Base:
+
+```text
+# First complete normal hook activation and record exactly one Sibyl intervention.
+comeback base-plan-claim
+# Send exactly the returned zero-value Base Sepolia transaction from the displayed owner.
+comeback base-claim --nonce NONCE --transaction CLAIM_TRANSACTION
+# Review and commit the claimed .comeback-repository.json before continuing.
+
+comeback doctor --agent codex
+comeback base-plan-activation
+# Send exactly the returned zero-value Base Sepolia transaction from the same owner.
+comeback base-activate --transaction ACTIVATION_TRANSACTION
+# Review and commit the active .comeback-repository.json.
+
+comeback base-status
+```
+
+Claim-first setup is also accepted, but `comeback doctor` then reports `BASE_INTERVENTION_PENDING` until the one permitted initial intervention is present. The planning commands verify the configured Base deployment and print exact unsigned `to`, `data`, and `value_wei` fields; they never sign or broadcast. The claim and activation commands accept a transaction hash only after verifying its sender, target, calldata, receipt, canonical block, safe-head inclusion, deployed runtime, and resulting anchor state. Keep the password and decrypted key out of command output and repository files.
+
+This is owner-specific trust on first use, not a global repository-ownership registry. The contract key includes the repository ID, nonce, and owner, so multiple wallets can create parallel anchors; the committed `.comeback-repository.json` selects the one this repository expects. The anchor detects substitution of that selected owner and, after activation, loss or alteration of the anchored initial Sibyl incident. It does not make arbitrary Sibyl state changes by the same operating-system user tamper-proof, attest that later outcome counters are truthful, isolate release credentials, or stop someone who can rewrite both the repository and its trusted Git history.
+
+Comeback uses the official Base Sepolia endpoint by default. A custom `--rpc-url` must use HTTPS unless it is loopback, but it is still one trusted provider: a malicious or compromised endpoint could fabricate the chain view supplied to Comeback. Use independent chain evidence when that trust assumption is unacceptable.
+
 ## Security boundary
 
 Comeback protects the configured release argument vector through its exact capability. Its raw-command detection is only defense in depth, not a general shell sandbox or complete command mediation layer. It recognizes direct release commands and common indirection, but a custom executable, unsupported tool, or another process can hide or perform an equivalent action. The capability is narrower: it receives no runtime command override and executes the preflight-resolved absolute executable with the signed argument array and `shell=False`. Windows batch launchers are not accepted. Never place passwords, private keys, API tokens, or credential-bearing URLs in a checkpoint or release argument array; use an operating-system credential helper or a future broker.
 
 The checkpoint receipt correlates the signed checkpoint specification, repository/execution-context fingerprint, timestamps, session, and zero exit code. Its digest is an integrity and correlation checksum, not a signature, remote attestation, or independent proof that the check was semantically sufficient. The fingerprint covers Git-visible state, effective Git configuration and hooks, the resolved direct executable and direct file arguments, and selected environment variables at preflight. It does not freeze ignored files, inputs opened transitively by a custom executable, remote network responses, or changes made concurrently after the final preflight check. Only the direct Git-push capability pins its source artifact to an immutable approved commit. An attacker running as the same operating-system user who can replace the Sibyl database or call its local write API can forge or substitute receipt state.
 
-For production, release credentials must be unavailable to the coding-agent process and exposed only through a separately authenticated Comeback-controlled broker. This local spike does not provide that credential boundary. An agent with unrestricted filesystem access can delete or replace the repository-local Sibyl database, release lock, owner keystore, or first-use repository/owner anchor. The committed repository anchor detects ordinary missing or changed anchor state, but it is not protection from an attacker who can alter both the working tree and trusted Git history. A future external trust registry can make owner identity and missing-state detection tamper-evident; it does not by itself isolate release credentials.
+For production, release credentials must be unavailable to the coding-agent process and exposed only through a separately authenticated Comeback-controlled broker. This local spike does not provide that credential boundary. Without active Base trust, an agent with unrestricted filesystem access can delete or replace the repository-local Sibyl database, release lock, owner keystore, or first-use repository/owner anchor. With active Base trust, Comeback can fail a protected release closed when the selected owner or anchored first intervention is absent, but it still cannot protect arbitrary local state from the same operating-system user. The committed repository anchor detects ordinary missing or changed anchor state; it is not protection from an attacker who can alter both the working tree and trusted Git history. Base does not by itself isolate release credentials.
 
 Do not use this spike to hold production deployment credentials or describe it as production security enforcement.
 
@@ -296,7 +328,7 @@ GitHub Actions runs the unit, deterministic memory, and installed-launcher gates
 
 ## Partner stacks
 
-None in this spike. Base and Virtuals remain excluded until the real Codex and Claude journeys pass on their supported operating systems.
+Base Sepolia is the only partner stack in this spike. Once activated, it provides the bounded repository-owner and first-intervention anchor described above; it is not used for payments, per-release receipts, or adaptive policy storage. No Virtuals integration is claimed.
 
 ## Prior Work
 

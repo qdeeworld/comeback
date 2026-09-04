@@ -1,13 +1,27 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import asdict
 import json
 import os
+import secrets
 import shlex
 import subprocess
 import sys
 from pathlib import Path
 
+from .base_trust import (
+    BASE_SEPOLIA_DEPLOYMENT_TX,
+    BASE_SEPOLIA_REGISTRY_ADDRESS,
+    BASE_SEPOLIA_REGISTRY_RUNTIME_HASH,
+    DEFAULT_BASE_SEPOLIA_RPC_URL,
+    BaseRpcConfig,
+    BaseTrustClient,
+    activation_calldata,
+    claim_calldata,
+    client_for_repository,
+    derive_anchor_key,
+)
 from .diagnostics import diagnose_repository
 from .execution import (
     execute_checkpoint,
@@ -15,7 +29,14 @@ from .execution import (
     read_release_lock,
     reconcile_release,
 )
-from .identity import repository_identity
+from .identity import (
+    BASE_SEPOLIA_CHAIN_ID,
+    BaseTrustConfig,
+    require_committed_repository_configuration,
+    repository_configuration,
+    repository_identity,
+    write_base_trust_transition,
+)
 from .installer import install_repository
 from .memory import InterventionMemory, MemoryIntegrityError, utc_now
 from .owner import (
@@ -34,7 +55,8 @@ class _ExactArgumentParser(argparse.ArgumentParser):
 
 
 def _memory(args: argparse.Namespace) -> tuple[InterventionMemory, str]:
-    root, repo_id = repository_identity(args.repo)
+    repository = repository_configuration(args.repo)
+    root, repo_id = repository.root, repository.repo_id
     if args.db:
         db = Path(args.db).expanduser().resolve()
     elif os.environ.get("COMEBACK_MEMORY_DB"):
@@ -44,7 +66,72 @@ def _memory(args: argparse.Namespace) -> tuple[InterventionMemory, str]:
         db = configured.resolve()
     else:
         db = root / ".comeback" / "memory.db"
-    return InterventionMemory(db, repo_id), repo_id
+    return InterventionMemory(
+        db,
+        repo_id,
+        base_trust=repository.base_trust,
+    ), repo_id
+
+
+def _database_path(args: argparse.Namespace, root: Path) -> Path:
+    if args.db:
+        return Path(args.db).expanduser().resolve()
+    configured = os.environ.get("COMEBACK_MEMORY_DB")
+    if configured:
+        path = Path(configured).expanduser()
+        if not path.is_absolute():
+            raise MemoryIntegrityError("COMEBACK_MEMORY_DB must be an absolute path")
+        return path.resolve()
+    return root / ".comeback" / "memory.db"
+
+
+def _deployment_client(rpc_url: str | None) -> BaseTrustClient:
+    return BaseTrustClient(
+        BaseRpcConfig(
+            rpc_url=rpc_url or DEFAULT_BASE_SEPOLIA_RPC_URL,
+            chain_id=BASE_SEPOLIA_CHAIN_ID,
+            contract_address=BASE_SEPOLIA_REGISTRY_ADDRESS,
+            runtime_code_hash=BASE_SEPOLIA_REGISTRY_RUNTIME_HASH,
+        )
+    )
+
+
+def _verify_configured_anchor_key(
+    client: BaseTrustClient,
+    trust: BaseTrustConfig,
+    *,
+    repo_id: str,
+) -> None:
+    derived = client.anchor_key(
+        repo_id=repo_id,
+        nonce=trust.nonce,
+        owner=trust.owner_address,
+    )
+    if derived != trust.anchor_key:
+        raise MemoryIntegrityError(
+            "committed Base anchor key does not match repository identity"
+        )
+
+
+def _anchorable_intervention(
+    memory: InterventionMemory, *, owner: str
+) -> str:
+    return memory.anchorable_intervention_id(owner=owner)
+
+
+def _preflight_existing_intervention(
+    args: argparse.Namespace,
+    *,
+    root: Path,
+    repo_id: str,
+    owner: str,
+) -> str | None:
+    """Validate any Sibyl incident that predates the Base owner claim."""
+
+    with InterventionMemory(_database_path(args, root), repo_id) as memory:
+        if not memory.all_lessons():
+            return None
+        return _anchorable_intervention(memory, owner=owner)
 
 
 def _intervention_record(args: argparse.Namespace) -> dict:
@@ -165,6 +252,29 @@ def _parser() -> argparse.ArgumentParser:
     owner = sub.add_parser("create-owner")
     owner.add_argument("--keystore")
     sub.add_parser("status")
+
+    base_plan_claim = sub.add_parser("base-plan-claim")
+    base_plan_claim.add_argument("--owner")
+    base_plan_claim.add_argument("--keystore")
+    base_plan_claim.add_argument("--nonce")
+    base_plan_claim.add_argument("--rpc-url")
+
+    base_claim = sub.add_parser("base-claim")
+    base_claim.add_argument("--transaction", required=True)
+    base_claim.add_argument("--owner")
+    base_claim.add_argument("--keystore")
+    base_claim.add_argument("--nonce", required=True)
+    base_claim.add_argument("--rpc-url")
+
+    base_plan_activation = sub.add_parser("base-plan-activation")
+    base_plan_activation.add_argument("--rpc-url")
+
+    base_activate = sub.add_parser("base-activate")
+    base_activate.add_argument("--transaction", required=True)
+    base_activate.add_argument("--rpc-url")
+
+    base_status = sub.add_parser("base-status")
+    base_status.add_argument("--rpc-url")
 
     prepare = sub.add_parser("prepare-intervention")
     prepare.add_argument("--session-id", required=True)
@@ -298,7 +408,11 @@ def main() -> None:
             return
         if args.command == "doctor":
             agents = ("codex", "claude") if args.agent == "both" else (args.agent,)
-            result = diagnose_repository(args.repo, agents=agents)
+            result = diagnose_repository(
+                args.repo,
+                agents=agents,
+                memory_db=args.db,
+            )
             print(json.dumps(result, indent=2, sort_keys=True))
             if result["gate"] != "PASS":
                 raise SystemExit(2)
@@ -307,9 +421,276 @@ def main() -> None:
             root, _ = repository_identity(args.repo)
             result = create_owner_interactive(_keystore_path(args, root))
             result["password_protects"] = (
-                "Only this local encrypted signing key; it is not a Sibyl, Codex, wallet-funds, "
-                "or Base transaction password."
+                "Only the local owner private key. The password is never sent to Sibyl, "
+                "Codex, or Base; unlocking the key can authorize Comeback signatures and, "
+                "when funded, Base transactions."
             )
+            print(json.dumps(result, indent=2, sort_keys=True))
+            return
+        if args.command in {
+            "base-plan-claim",
+            "base-claim",
+            "base-plan-activation",
+            "base-activate",
+            "base-status",
+        }:
+            repository = (
+                require_committed_repository_configuration(args.repo)
+                if args.command in {"base-plan-claim", "base-claim"}
+                else repository_configuration(args.repo)
+            )
+            root, repo_id = repository.root, repository.repo_id
+            if args.command == "base-plan-claim":
+                if repository.base_trust is not None:
+                    raise MemoryIntegrityError(
+                        "Base trust is already configured for this repository"
+                    )
+                owner = (
+                    args.owner.lower()
+                    if args.owner
+                    else owner_address(_keystore_path(args, root))
+                )
+                nonce = args.nonce or "0x" + secrets.token_hex(32)
+                anchor_key = derive_anchor_key(
+                    chain_id=BASE_SEPOLIA_CHAIN_ID,
+                    contract_address=BASE_SEPOLIA_REGISTRY_ADDRESS,
+                    repo_id=repo_id,
+                    nonce=nonce,
+                    owner=owner,
+                )
+                _preflight_existing_intervention(
+                    args,
+                    root=root,
+                    repo_id=repo_id,
+                    owner=owner,
+                )
+                client = _deployment_client(args.rpc_url)
+                client.verify_endpoint()
+                result = {
+                    "action": "claim",
+                    "network": "Base Sepolia",
+                    "chain_id": BASE_SEPOLIA_CHAIN_ID,
+                    "contract": BASE_SEPOLIA_REGISTRY_ADDRESS,
+                    "deployment_transaction": BASE_SEPOLIA_DEPLOYMENT_TX,
+                    "repo_id": repo_id,
+                    "owner": owner,
+                    "nonce": nonce.lower(),
+                    "anchor_key": anchor_key,
+                    "transaction": {
+                        "to": BASE_SEPOLIA_REGISTRY_ADDRESS,
+                        "data": claim_calldata(repo_id=repo_id, nonce=nonce),
+                        "value_wei": 0,
+                    },
+                    "next": (
+                        "Send this exact transaction from owner, wait for Base safe inclusion, "
+                        "then run `comeback base-claim --nonce <nonce> --transaction <tx-hash>`."
+                    ),
+                }
+            elif args.command == "base-claim":
+                if repository.base_trust is not None:
+                    raise MemoryIntegrityError(
+                        "Base trust is already configured for this repository"
+                    )
+                owner = (
+                    args.owner.lower()
+                    if args.owner
+                    else owner_address(_keystore_path(args, root))
+                )
+                preflight_intervention = _preflight_existing_intervention(
+                    args,
+                    root=root,
+                    repo_id=repo_id,
+                    owner=owner,
+                )
+                client = _deployment_client(args.rpc_url)
+                receipt = client.verify_claim_receipt(
+                    transaction_hash=args.transaction,
+                    repo_id=repo_id,
+                    nonce=args.nonce,
+                    owner=owner,
+                )
+                client.verify_claim(repo_id=repo_id, nonce=args.nonce, owner=owner)
+                verified_intervention = _preflight_existing_intervention(
+                    args,
+                    root=root,
+                    repo_id=repo_id,
+                    owner=owner,
+                )
+                if verified_intervention != preflight_intervention:
+                    raise MemoryIntegrityError(
+                        "Sibyl intervention state changed while the Base claim was being verified; rerun the command"
+                    )
+                anchor_key = client.anchor_key(
+                    repo_id=repo_id,
+                    nonce=args.nonce,
+                    owner=owner,
+                )
+                trust_document = {
+                    "required": True,
+                    "chain_id": BASE_SEPOLIA_CHAIN_ID,
+                    "registry_address": BASE_SEPOLIA_REGISTRY_ADDRESS,
+                    "runtime_code_hash": BASE_SEPOLIA_REGISTRY_RUNTIME_HASH,
+                    "owner_address": owner,
+                    "nonce": args.nonce.lower(),
+                    "anchor_key": anchor_key,
+                    "claim_tx_hash": receipt.transaction_hash,
+                    "claim_block_number": receipt.block_number,
+                    "status": "claimed",
+                }
+                written = write_base_trust_transition(root, trust_document)
+                result = {
+                    "status": "claimed",
+                    "repo_id": repo_id,
+                    "base_trust": asdict(written.base_trust),
+                    "next": (
+                        "Review and commit `.comeback-repository.json` before recording or "
+                        "activating the first Base-backed intervention."
+                    ),
+                }
+            elif args.command == "base-plan-activation":
+                trust = repository.base_trust
+                if trust is None or trust.status != "claimed":
+                    raise MemoryIntegrityError(
+                        "Base trust must be committed in claimed state before activation"
+                    )
+                client = client_for_repository(trust, rpc_url=args.rpc_url)
+                _verify_configured_anchor_key(client, trust, repo_id=repo_id)
+                client.verify_claim(
+                    repo_id=repo_id,
+                    nonce=trust.nonce,
+                    owner=trust.owner_address,
+                )
+                with InterventionMemory(_database_path(args, root), repo_id) as local_memory:
+                    intervention_id = _anchorable_intervention(
+                        local_memory, owner=trust.owner_address
+                    )
+                result = {
+                    "action": "activate",
+                    "network": "Base Sepolia",
+                    "chain_id": trust.chain_id,
+                    "contract": trust.registry_address,
+                    "repo_id": repo_id,
+                    "owner": trust.owner_address,
+                    "anchor_key": trust.anchor_key,
+                    "initial_intervention_id": intervention_id,
+                    "transaction": {
+                        "to": trust.registry_address,
+                        "data": activation_calldata(
+                            anchor_key=trust.anchor_key,
+                            initial_intervention_id=intervention_id,
+                        ),
+                        "value_wei": 0,
+                    },
+                    "next": (
+                        "Send this exact transaction from the Base owner, wait for safe inclusion, "
+                        "then run `comeback base-activate --transaction <tx-hash>`."
+                    ),
+                }
+            elif args.command == "base-activate":
+                trust = repository.base_trust
+                if trust is None or trust.status != "claimed":
+                    raise MemoryIntegrityError(
+                        "Base trust must be committed in claimed state before activation"
+                    )
+                # Read Sibyl without the claimed-state runtime guard so this
+                # command can recover after the activation transaction mined
+                # but before the local schema transition completed.
+                with InterventionMemory(_database_path(args, root), repo_id) as local_memory:
+                    intervention_id = _anchorable_intervention(
+                        local_memory, owner=trust.owner_address
+                    )
+                client = client_for_repository(trust, rpc_url=args.rpc_url)
+                _verify_configured_anchor_key(client, trust, repo_id=repo_id)
+                receipt = client.verify_activation_receipt(
+                    transaction_hash=args.transaction,
+                    repo_id=repo_id,
+                    nonce=trust.nonce,
+                    owner=trust.owner_address,
+                    initial_intervention_id=intervention_id,
+                )
+                trust_document = {
+                    **asdict(trust),
+                    "status": "active",
+                    "initial_intervention_id": intervention_id,
+                    "activation_tx_hash": receipt.transaction_hash,
+                    "activation_block_number": receipt.block_number,
+                }
+                written = write_base_trust_transition(root, trust_document)
+                result = {
+                    "status": "active",
+                    "repo_id": repo_id,
+                    "base_trust": asdict(written.base_trust),
+                    "next": (
+                        "Review and commit `.comeback-repository.json`; Base-backed missing-Sibyl "
+                        "release refusal becomes active only from that committed configuration."
+                    ),
+                }
+            else:
+                trust = repository.base_trust
+                if trust is None:
+                    client = _deployment_client(args.rpc_url)
+                    client.verify_endpoint()
+                    result = {
+                        "status": "not_configured",
+                        "network": "Base Sepolia",
+                        "chain_id": BASE_SEPOLIA_CHAIN_ID,
+                        "contract": BASE_SEPOLIA_REGISTRY_ADDRESS,
+                        "runtime_code_hash": BASE_SEPOLIA_REGISTRY_RUNTIME_HASH,
+                        "deployment_transaction": BASE_SEPOLIA_DEPLOYMENT_TX,
+                    }
+                else:
+                    client = client_for_repository(trust, rpc_url=args.rpc_url)
+                    _verify_configured_anchor_key(client, trust, repo_id=repo_id)
+                    claim = client.verify_claim_receipt(
+                        transaction_hash=trust.claim_tx_hash,
+                        repo_id=repo_id,
+                        nonce=trust.nonce,
+                        owner=trust.owner_address,
+                    )
+                    details: dict[str, object] = {
+                        "status": trust.status,
+                        "network": "Base Sepolia",
+                        "chain_id": trust.chain_id,
+                        "contract": trust.registry_address,
+                        "anchor_key": trust.anchor_key,
+                        "owner": trust.owner_address,
+                        "claim_transaction": claim.transaction_hash,
+                        "claim_block_number": claim.block_number,
+                    }
+                    if trust.status == "active":
+                        activation = client.verify_activation_receipt(
+                            transaction_hash=str(trust.activation_tx_hash),
+                            repo_id=repo_id,
+                            nonce=trust.nonce,
+                            owner=trust.owner_address,
+                            initial_intervention_id=str(
+                                trust.initial_intervention_id
+                            ),
+                        )
+                        client.verify_active(
+                            repo_id=repo_id,
+                            nonce=trust.nonce,
+                            owner=trust.owner_address,
+                            initial_intervention_id=str(
+                                trust.initial_intervention_id
+                            ),
+                        )
+                        details.update(
+                            {
+                                "activation_transaction": activation.transaction_hash,
+                                "activation_block_number": activation.block_number,
+                                "initial_intervention_id": trust.initial_intervention_id,
+                                "memory_expected": True,
+                            }
+                        )
+                    else:
+                        client.verify_claim(
+                            repo_id=repo_id,
+                            nonce=trust.nonce,
+                            owner=trust.owner_address,
+                        )
+                        details["memory_expected"] = False
+                    result = details
             print(json.dumps(result, indent=2, sort_keys=True))
             return
         memory, repo_id = _memory(args)

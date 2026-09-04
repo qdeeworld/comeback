@@ -15,14 +15,15 @@ from typing import Any
 
 from eth_account import Account
 from eth_account.messages import encode_defunct
+from sibyl_memory_client.exceptions import NotFoundError
 
 try:
     import tomllib
 except ModuleNotFoundError:  # pragma: no cover - Python 3.10 only
     import tomli as tomllib
 
-from .identity import repository_identity
-from .memory import InterventionMemory
+from .identity import BaseTrustConfig, repository_configuration
+from .memory import InterventionMemory, MemoryIntegrityError
 from .signing import intervention_message
 
 
@@ -491,8 +492,185 @@ def _run_codex_activation_probe(
         return activation
 
 
+def _base_probe_interventions(
+    *,
+    root: Path,
+    repo_id: str,
+    base_trust: BaseTrustConfig,
+    agent_family: str,
+    database: Path | None = None,
+) -> list[dict[str, Any]]:
+    """Load signed Sibyl evidence that an isolated Base-aware probe may replay.
+
+    A Base-active hook must see the intervention whose ID is committed onchain.
+    Inventing a disposable signer would either fail that check or weaken the
+    exact authority boundary the doctor is meant to prove.  Read the real
+    working store, verify it against Base, then return only signed intervention
+    records for replay into the doctor's isolated store.
+    """
+
+    database = database or (root / ".comeback" / "memory.db")
+    if not database.is_file():
+        if base_trust.status == "claimed":
+            raise DiagnosticFailure(
+                "BASE_INTERVENTION_PENDING",
+                "the Base claim is configured, but no signed Sibyl intervention exists yet",
+                next_action=(
+                    "Create the first intervention signed by the configured Base owner, "
+                    "then rerun `comeback doctor` before activating it on Base."
+                ),
+                details={
+                    "base_trust": {
+                        "status": base_trust.status,
+                        "owner_address": base_trust.owner_address,
+                        "memory_database": str(database),
+                    }
+                },
+            )
+        raise DiagnosticFailure(
+            "BASE_ANCHORED_MEMORY_MISSING",
+            (
+                "Base requires an activated Sibyl intervention, but the working "
+                "memory store is missing"
+            ),
+            next_action=(
+                "Do not release. Restore `.comeback/memory.db` containing the exact "
+                "Base-anchored intervention, then rerun `comeback doctor`."
+            ),
+            details={
+                "base_trust": {
+                    "status": base_trust.status,
+                    "initial_intervention_id": base_trust.initial_intervention_id,
+                    "memory_database": str(database),
+                }
+            },
+        )
+
+    try:
+        with InterventionMemory(
+            database,
+            repo_id,
+            base_trust=base_trust,
+        ) as memory:
+            # This is the important trust check: all_lessons verifies the
+            # committed owner/anchor against Base and fails closed when an
+            # active anchor's initial Sibyl intervention is absent.
+            lessons = memory.all_lessons()
+            if not lessons:
+                raise DiagnosticFailure(
+                    "BASE_INTERVENTION_PENDING",
+                    "the Base claim is configured, but no signed Sibyl intervention exists yet",
+                    next_action=(
+                        "Create the first intervention signed by the configured Base owner, "
+                        "then rerun `comeback doctor` before activating it on Base."
+                    ),
+                    details={
+                        "base_trust": {
+                            "status": base_trust.status,
+                            "owner_address": base_trust.owner_address,
+                            "memory_database": str(database),
+                        }
+                    },
+                )
+
+            recorded_ids = {
+                intervention_id
+                for lesson in lessons
+                for intervention_id in lesson["applied_intervention_ids"]
+            }
+            if base_trust.status == "active":
+                anchored_id = str(base_trust.initial_intervention_id)
+            else:
+                if len(recorded_ids) != 1:
+                    raise DiagnosticFailure(
+                        "BASE_INTERVENTION_AMBIGUOUS",
+                        (
+                            "claimed Base trust must have exactly one initial Sibyl "
+                            "intervention before activation"
+                        ),
+                        next_action=(
+                            "Do not activate Base. Restore the single owner-signed initial "
+                            "intervention, then rerun `comeback doctor`."
+                        ),
+                        details={"base_trust": {"status": base_trust.status}},
+                    )
+                anchored_id = next(iter(recorded_ids))
+
+            applicable = [
+                lesson
+                for lesson in lessons
+                if lesson.get("agent_scope", "same_agent") == "all_supported"
+                or lesson["agent_family"].lower() == agent_family.lower()
+            ]
+            if not applicable:
+                raise DiagnosticFailure(
+                    "BASE_AGENT_INTERVENTION_MISSING",
+                    f"no Base-backed Sibyl intervention applies to {agent_family}",
+                    next_action=(
+                        f"Record an owner-signed {agent_family} intervention, then rerun "
+                        "the doctor before relying on this agent's release gate."
+                    ),
+                    details={"base_trust": {"status": base_trust.status}},
+                )
+
+            # Always include the onchain-anchored incident. Also include each
+            # applicable lesson's latest signed incident so the probe exercises
+            # the current signed command policy rather than an obsolete one.
+            selected_ids = [anchored_id]
+            for lesson in applicable:
+                latest_id = lesson["applied_intervention_ids"][-1]
+                if latest_id not in selected_ids:
+                    selected_ids.append(latest_id)
+
+            records: list[dict[str, Any]] = []
+            for intervention_id in selected_ids:
+                incident = memory.client.get_entity(
+                    memory.INCIDENT_CATEGORY,
+                    intervention_id,
+                ).get("body")
+                if (
+                    not isinstance(incident, dict)
+                    or incident.get("incident_id") != intervention_id
+                    or not isinstance(incident.get("signed_fields"), dict)
+                    or not isinstance(incident.get("intervention_signature"), str)
+                ):
+                    raise MemoryIntegrityError(
+                        f"Sibyl intervention incident is missing or corrupted: {intervention_id}"
+                    )
+                records.append(
+                    {
+                        "expected_intervention_id": intervention_id,
+                        "signed_fields": incident["signed_fields"],
+                        "intervention_signature": incident["intervention_signature"],
+                        "incident_summary": str(incident.get("incident_summary", "")),
+                    }
+                )
+            return records
+    except DiagnosticFailure:
+        raise
+    except (OSError, RuntimeError, ValueError, NotFoundError) as exc:
+        raise DiagnosticFailure(
+            "BASE_INTERVENTION_INVALID",
+            f"the Base-backed Sibyl intervention could not be verified: {exc}",
+            next_action=(
+                "Do not release. Restore the exact Base-backed Sibyl memory and "
+                "network access, then rerun `comeback doctor`."
+            ),
+            details={
+                "base_trust": {
+                    "status": base_trust.status,
+                    "memory_database": str(database),
+                }
+            },
+        ) from exc
+
+
 def _run_codex_pretool_probe(
-    *, root: Path, repo_id: str, executable: str
+    *,
+    root: Path,
+    repo_id: str,
+    executable: str,
+    intervention_records: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Prove a real fresh Codex process dispatches PreToolUse before execution."""
 
@@ -513,50 +691,84 @@ def _run_codex_pretool_probe(
             encoding="utf-8",
         )
         relative_script = script.relative_to(root).as_posix()
-        owner = Account.create()
-        source_session = "doctor-source-" + uuid.uuid4().hex
-        signed_fields = {
-            "lesson_id": "release-release_workflow-codex",
-            "repo_id": repo_id,
-            "task_class": "release",
-            "area": "release_workflow",
-            "agent_family": "Codex",
-            "agent_scope": "same_agent",
-            "severity": "release_blocker",
-            "action_schema": 2,
-            "checkpoint_spec": {
-                "argv": [sys.executable, "-c", "print('doctor checkpoint')"],
-                "timeout_seconds": 60,
-            },
-            "release_spec": {
-                "argv": [sys.executable, relative_script],
-                "timeout_seconds": 60,
-            },
-            "state_policy": {"bind_head": False, "require_clean_git": False},
-            "required_evidence": ["release_check_passed", "human_approval"],
-            "authorized_closer": owner.address.lower(),
-            "source_session_id": source_session,
-            "incident_at": datetime.now(timezone.utc).isoformat(),
-        }
-        with InterventionMemory(database, repo_id) as memory:
-            memory.start_run(
-                session_id=source_session,
-                task_class="release",
-                area="release_workflow",
-                agent_family="Codex",
-                model="comeback-doctor-source",
-            )
+        records = intervention_records
+        if records is None:
+            owner = Account.create()
+            source_session = "doctor-source-" + uuid.uuid4().hex
+            signed_fields = {
+                "lesson_id": "release-release_workflow-codex",
+                "repo_id": repo_id,
+                "task_class": "release",
+                "area": "release_workflow",
+                "agent_family": "Codex",
+                "agent_scope": "same_agent",
+                "severity": "release_blocker",
+                "action_schema": 2,
+                "checkpoint_spec": {
+                    "argv": [sys.executable, "-c", "print('doctor checkpoint')"],
+                    "timeout_seconds": 60,
+                },
+                "release_spec": {
+                    "argv": [sys.executable, relative_script],
+                    "timeout_seconds": 60,
+                },
+                "state_policy": {"bind_head": False, "require_clean_git": False},
+                "required_evidence": ["release_check_passed", "human_approval"],
+                "authorized_closer": owner.address.lower(),
+                "source_session_id": source_session,
+                "incident_at": datetime.now(timezone.utc).isoformat(),
+            }
             signature = Account.sign_message(
                 encode_defunct(text=intervention_message(signed_fields)),
                 private_key=owner.key,
             ).signature.hex()
-            memory.record_intervention(
+            records = [
                 {
                     "signed_fields": signed_fields,
                     "intervention_signature": signature,
                     "incident_summary": "Comeback doctor disposable release denial.",
                 }
-            )
+            ]
+
+        source_sessions: set[str] = set()
+        with InterventionMemory(database, repo_id) as memory:
+            for record in records:
+                signed_fields = record.get("signed_fields")
+                if not isinstance(signed_fields, dict):
+                    raise DiagnosticFailure(
+                        "BASE_INTERVENTION_INVALID",
+                        "the doctor received an invalid signed intervention fixture",
+                        next_action="Restore the Base-backed Sibyl memory, then rerun the doctor.",
+                    )
+                source_session = str(signed_fields.get("source_session_id", ""))
+                source_sessions.add(source_session)
+                memory.start_run(
+                    session_id=source_session,
+                    task_class=str(signed_fields.get("task_class", "")),
+                    area=str(signed_fields.get("area", "")),
+                    agent_family=str(signed_fields.get("agent_family", "")),
+                    model="comeback-doctor-source",
+                )
+                lesson = memory.record_intervention(
+                    {
+                        "signed_fields": signed_fields,
+                        "intervention_signature": record.get("intervention_signature"),
+                        "incident_summary": record.get("incident_summary", ""),
+                    }
+                )
+                expected_id = record.get("expected_intervention_id")
+                if (
+                    expected_id is not None
+                    and expected_id not in lesson["applied_intervention_ids"]
+                ):
+                    raise DiagnosticFailure(
+                        "BASE_INTERVENTION_INVALID",
+                        "the signed Sibyl intervention does not match its expected Base-backed ID",
+                        next_action=(
+                            "Restore the exact Base-backed Sibyl memory, then rerun "
+                            "the doctor."
+                        ),
+                    )
 
         environment = os.environ.copy()
         environment["COMEBACK_MEMORY_DB"] = str(database)
@@ -608,7 +820,7 @@ def _run_codex_pretool_probe(
                 run
                 for run in runs
                 if run.get("task_class") == "release"
-                and run.get("session_id") != source_session
+                and run.get("session_id") not in source_sessions
             ]
             decisions = (
                 memory.pretool_decisions(release_runs[0]["session_id"])
@@ -687,8 +899,32 @@ def _run_codex_pretool_probe(
         return proof
 
 
-def diagnose_repository(repo: str | Path, *, agents: tuple[str, ...] = ("codex",)) -> dict[str, Any]:
-    root, repo_id = repository_identity(repo)
+def diagnose_repository(
+    repo: str | Path,
+    *,
+    agents: tuple[str, ...] = ("codex",),
+    memory_db: str | Path | None = None,
+) -> dict[str, Any]:
+    repository = repository_configuration(repo)
+    root, repo_id = repository.root, repository.repo_id
+    selected_memory: Path | None = None
+    if repository.base_trust is not None:
+        if memory_db is not None:
+            selected_memory = Path(memory_db).expanduser().resolve()
+        elif os.environ.get("COMEBACK_MEMORY_DB"):
+            configured = Path(str(os.environ["COMEBACK_MEMORY_DB"])).expanduser()
+            if not configured.is_absolute():
+                raise DiagnosticFailure(
+                    "MEMORY_OVERRIDE_INVALID",
+                    "COMEBACK_MEMORY_DB must be an absolute path",
+                    next_action=(
+                        "Unset COMEBACK_MEMORY_DB or select the exact absolute Sibyl "
+                        "database, then rerun `comeback doctor`."
+                    ),
+                )
+            selected_memory = configured.resolve()
+        else:
+            selected_memory = root / ".comeback" / "memory.db"
     checks: dict[str, Any] = {}
     errors: list[dict[str, Any]] = []
     for agent in agents:
@@ -703,6 +939,17 @@ def diagnose_repository(repo: str | Path, *, agents: tuple[str, ...] = ("codex",
             capability_executable = _capability_executable(handler)
             client = _client_check(agent, root)
             if agent == "codex":
+                intervention_records = (
+                    _base_probe_interventions(
+                        root=root,
+                        repo_id=repo_id,
+                        base_trust=repository.base_trust,
+                        agent_family="Codex",
+                        database=selected_memory,
+                    )
+                    if repository.base_trust is not None
+                    else None
+                )
                 activation = _run_codex_activation_probe(
                     root=root,
                     repo_id=repo_id,
@@ -712,6 +959,7 @@ def diagnose_repository(repo: str | Path, *, agents: tuple[str, ...] = ("codex",
                     root=root,
                     repo_id=repo_id,
                     executable=str(client["executable"]),
+                    intervention_records=intervention_records,
                 )
                 checks[agent] = {
                     "gate": "PASS",

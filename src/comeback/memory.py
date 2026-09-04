@@ -16,7 +16,8 @@ from urllib.parse import urlsplit
 from sibyl_memory_client import MemoryClient
 from sibyl_memory_client.exceptions import NotFoundError
 
-from .identity import tenant_id
+from .base_trust import BaseTrustError, client_for_repository
+from .identity import BaseTrustConfig, tenant_id
 from .policy import MODES, mode_for_outcomes, requirements_for_mode
 from .signing import (
     action_spec_digest,
@@ -40,6 +41,10 @@ _MUTATION_LOCK_TIMEOUT_SECONDS = 3.0
 def _serialized_mutation(method):
     @functools.wraps(method)
     def wrapped(self, *args, **kwargs):
+        # Base is immutable verification input, not Sibyl mutation state. Keep
+        # network I/O outside the cross-process SQLite mutation lock so an RPC
+        # stall cannot prevent an unrelated low-risk session from opening.
+        self._preverify_base_mutation(method.__name__, args, kwargs)
         with self._mutation_lock():
             return method(self, *args, **kwargs)
 
@@ -82,14 +87,12 @@ def _lesson_mode(*, probation_success_count: int, unresolved_release_count: int)
 
 
 def _intervention_id(fields: dict[str, Any]) -> str:
-    identity = {
-        "repo_id": fields["repo_id"],
-        "lesson_id": fields["lesson_id"],
-        "source_session_id": fields["source_session_id"],
-    }
-    return hashlib.sha256(
-        json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()
-    ).hexdigest()
+    # This ID becomes the immutable Base commitment for the first incident.
+    # Commit the exact complete signed payload, not merely its source-session
+    # coordinates (and not a normalized unsigned derivative), so another
+    # validly signed checkpoint/release variant cannot masquerade as the
+    # anchored intervention. Canonical JSON makes dictionary ordering irrelevant.
+    return hashlib.sha256(intervention_message(fields).encode("utf-8")).hexdigest()
 
 
 def _strings(value: Any, field: str) -> list[str]:
@@ -261,6 +264,46 @@ def _signed_intervention_fields(value: Any) -> dict[str, Any]:
     if incident.tzinfo is None:
         raise MemoryIntegrityError("intervention timestamp must include a timezone")
     return fields
+
+
+def _validated_intervention_incident(
+    body: Any,
+    *,
+    expected_id: str,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Validate an incident and return its stored body and normalized fields.
+
+    The incident ID and signature are both derived from the exact stored
+    ``signed_fields`` object. This deliberately preserves valid v1 records that
+    omitted the optional ``agent_scope`` field while refusing IDs produced by
+    the older coordinates-only algorithm.
+    """
+
+    if not isinstance(body, dict):
+        raise MemoryIntegrityError(
+            f"Sibyl intervention incident is invalid: {expected_id}"
+        )
+    signed_fields = body.get("signed_fields")
+    signature = body.get("intervention_signature")
+    normalized = _signed_intervention_fields(signed_fields)
+    if not isinstance(signed_fields, dict) or not isinstance(signature, str):
+        raise MemoryIntegrityError(
+            f"Sibyl intervention incident is invalid: {expected_id}"
+        )
+    closer = normalized["authorized_closer"].lower()
+    if (
+        body.get("incident_id") != expected_id
+        or _intervention_id(signed_fields) != expected_id
+        or body.get("lesson_id") != normalized["lesson_id"]
+        or body.get("repo_id") != normalized["repo_id"]
+        or body.get("source_session_id") != normalized["source_session_id"]
+        or body.get("status") != "recorded"
+        or recover_address(intervention_message(signed_fields), signature) != closer
+    ):
+        raise MemoryIntegrityError(
+            f"Sibyl intervention incident is invalid: {expected_id}"
+        )
+    return deepcopy(body), normalized
 
 
 def _checkpoint_receipt(value: Any, run: dict[str, Any]) -> dict[str, Any]:
@@ -650,10 +693,26 @@ class InterventionMemory:
     INCIDENT_CATEGORY = "intervention_incident"
     RUN_CATEGORY = "supervision_run"
 
-    def __init__(self, db_path: str | Path, repo_id: str) -> None:
+    def __init__(
+        self,
+        db_path: str | Path,
+        repo_id: str,
+        *,
+        base_trust: BaseTrustConfig | None = None,
+        base_client: Any | None = None,
+    ) -> None:
+        if base_client is not None and base_trust is None:
+            raise ValueError("a Base client requires committed Base trust configuration")
         self.repo_id = repo_id
         self.db_path = Path(db_path).expanduser().resolve()
         self.client = MemoryClient.local(self.db_path, tenant_id=tenant_id(repo_id))
+        self.base_trust = base_trust
+        self.base_client = (
+            base_client
+            if base_client is not None
+            else (client_for_repository(base_trust) if base_trust is not None else None)
+        )
+        self._verified_base_state: Any | None = None
 
     def close(self) -> None:
         """Release Sibyl's cached SQLite handles deterministically.
@@ -671,6 +730,193 @@ class InterventionMemory:
 
     def __exit__(self, _exc_type, _exc, _traceback) -> None:
         self.close()
+
+    def _load_all_lessons(self) -> list[dict[str, Any]]:
+        lessons: list[dict[str, Any]] = []
+        for source_agent in _SUPPORTED_AGENTS:
+            lesson_id = f"release-release_workflow-{source_agent.lower()}"
+            try:
+                entity = self.client.get_entity(self.LESSON_CATEGORY, lesson_id)
+            except NotFoundError:
+                continue
+            lesson = validate_lesson(entity.get("body"))
+            if lesson["repo_id"] == self.repo_id:
+                lessons.append(lesson)
+        return sorted(lessons, key=lambda lesson: lesson["lesson_id"])
+
+    def _load_intervention_incident(
+        self,
+        intervention_id: str,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        try:
+            body = self.client.get_entity(
+                self.INCIDENT_CATEGORY,
+                intervention_id,
+            ).get("body")
+        except NotFoundError as exc:
+            raise MemoryIntegrityError(
+                f"Sibyl intervention incident is missing: {intervention_id}"
+            ) from exc
+        body, fields = _validated_intervention_incident(
+            body,
+            expected_id=intervention_id,
+        )
+        if fields["repo_id"] != self.repo_id:
+            raise MemoryIntegrityError(
+                f"Sibyl intervention incident is invalid: {intervention_id}"
+            )
+        return body, fields
+
+    def anchorable_intervention_id(self, *, owner: str) -> str:
+        """Return the one full-payload intervention that Base may activate."""
+
+        owner = owner.lower()
+        lessons = self.all_lessons()
+        if not lessons:
+            raise MemoryIntegrityError(
+                "Base activation requires one signed Sibyl intervention"
+            )
+        if any(lesson["authorized_closer"] != owner for lesson in lessons):
+            raise MemoryIntegrityError(
+                "Sibyl intervention authority differs from the Base repository owner"
+            )
+        intervention_ids = {
+            intervention_id
+            for lesson in lessons
+            for intervention_id in lesson["applied_intervention_ids"]
+        }
+        if len(intervention_ids) != 1:
+            raise MemoryIntegrityError(
+                "Base activation requires exactly one initial Sibyl intervention"
+            )
+        intervention_id = next(iter(intervention_ids))
+        _, fields = self._load_intervention_incident(intervention_id)
+        if fields["authorized_closer"].lower() != owner or not any(
+            lesson["lesson_id"] == fields["lesson_id"]
+            and intervention_id in lesson["applied_intervention_ids"]
+            for lesson in lessons
+        ):
+            raise MemoryIntegrityError(
+                f"Sibyl intervention incident is invalid: {intervention_id}"
+            )
+        return intervention_id
+
+    def _verify_base_trust(
+        self,
+        lessons: list[dict[str, Any]],
+        *,
+        require_memory: bool,
+    ) -> Any | None:
+        trust = self.base_trust
+        if trust is None:
+            return None
+        if self.base_client is None:
+            raise MemoryIntegrityError("Base trust client is unavailable")
+        try:
+            derived_key = self.base_client.anchor_key(
+                repo_id=self.repo_id,
+                nonce=trust.nonce,
+                owner=trust.owner_address,
+            )
+            if derived_key != trust.anchor_key:
+                raise MemoryIntegrityError(
+                    "committed Base anchor key does not match repository identity"
+                )
+            if self._verified_base_state is None:
+                if trust.status == "active":
+                    self._verified_base_state = self.base_client.verify_active(
+                        repo_id=self.repo_id,
+                        nonce=trust.nonce,
+                        owner=trust.owner_address,
+                        initial_intervention_id=str(trust.initial_intervention_id),
+                    )
+                else:
+                    self._verified_base_state = self.base_client.verify_claim(
+                        repo_id=self.repo_id,
+                        nonce=trust.nonce,
+                        owner=trust.owner_address,
+                    )
+        except MemoryIntegrityError:
+            raise
+        except (BaseTrustError, RuntimeError, ValueError) as exc:
+            raise MemoryIntegrityError(f"Base trust verification failed: {exc}") from exc
+
+        if any(
+            lesson["authorized_closer"].lower() != trust.owner_address
+            for lesson in lessons
+        ):
+            raise MemoryIntegrityError(
+                "Sibyl intervention authority differs from the Base repository owner"
+            )
+        if trust.status == "active" and require_memory:
+            initial_id = trust.initial_intervention_id
+            matching_lessons = (
+                [
+                    lesson
+                    for lesson in lessons
+                    if isinstance(initial_id, str)
+                    and initial_id in lesson["applied_intervention_ids"]
+                ]
+                if isinstance(initial_id, str)
+                else []
+            )
+            if not matching_lessons:
+                raise MemoryIntegrityError(
+                    "Base expects an activated Sibyl intervention that is missing; restore the memory store"
+                )
+            try:
+                _, fields = self._load_intervention_incident(initial_id)
+            except MemoryIntegrityError as exc:
+                raise MemoryIntegrityError(
+                    "Base expects an activated Sibyl intervention that is missing or invalid; restore the memory store"
+                ) from exc
+            if (
+                fields["authorized_closer"].lower() != trust.owner_address
+                or not any(
+                    lesson["lesson_id"] == fields["lesson_id"]
+                    for lesson in matching_lessons
+                )
+            ):
+                raise MemoryIntegrityError(
+                    "Base expects an activated Sibyl intervention that is missing or invalid; restore the memory store"
+                )
+        return self._verified_base_state
+
+    def _preverify_base_mutation(
+        self,
+        method_name: str,
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+    ) -> None:
+        if self.base_trust is None:
+            return
+        if method_name == "start_run":
+            if kwargs.get("task_class") != "release":
+                return
+        elif method_name == "record_intervention":
+            pass
+        elif method_name in {
+            "record_pretool_decision",
+            "begin_checkpoint_attempt",
+            "finish_checkpoint_attempt",
+            "record_checkpoint_receipt",
+            "approve",
+            "begin_release",
+        }:
+            session_id = kwargs.get("session_id")
+            if session_id is None and args:
+                session_id = args[0]
+            run = self.get_run(str(session_id))
+            if run["task_class"] != "release":
+                return
+        else:
+            # Outcome and reconciliation writes must remain available after a
+            # release side effect even if Base is temporarily unreachable.
+            return
+        self._verify_base_trust(
+            self._load_all_lessons(),
+            require_memory=self.base_trust.status == "active",
+        )
 
     @contextmanager
     def _mutation_lock(self):
@@ -736,8 +982,18 @@ class InterventionMemory:
         closer = normalized_signed_fields["authorized_closer"].lower()
         if recover_address(intervention_message(signed_fields), signature) != closer:
             raise MemoryIntegrityError("intervention signature is invalid")
+        existing_lessons = self._load_all_lessons()
+        self._verify_base_trust(
+            existing_lessons,
+            require_memory=self.base_trust is not None
+            and self.base_trust.status == "active",
+        )
+        if self.base_trust is not None and closer != self.base_trust.owner_address:
+            raise MemoryIntegrityError(
+                "intervention is not signed by the Base repository owner"
+            )
         lesson_id = normalized_signed_fields["lesson_id"]
-        for existing in self.all_lessons():
+        for existing in existing_lessons:
             if existing["authorized_closer"] != closer:
                 raise MemoryIntegrityError(
                     "authorized closer is already anchored for this repository"
@@ -756,7 +1012,43 @@ class InterventionMemory:
                 raise MemoryIntegrityError(
                     "overlapping agent scopes require identical signed action and state policies"
                 )
-        incident_id = _intervention_id(normalized_signed_fields)
+        # The Base commitment must be a digest of the payload the owner
+        # actually signed. A legacy record may omit optional agent_scope; its
+        # default is used for behavior but is not silently inserted into the
+        # signed preimage.
+        incident_id = _intervention_id(signed_fields)
+        for existing in existing_lessons:
+            for recorded_id in existing["applied_intervention_ids"]:
+                if recorded_id == incident_id:
+                    # Preserve projection-first repair for an exact retry. The
+                    # incident entity itself is compared later in this method.
+                    continue
+                _, historical_fields = self._load_intervention_incident(recorded_id)
+                if (
+                    historical_fields["lesson_id"] != existing["lesson_id"]
+                    or historical_fields["authorized_closer"].lower()
+                    != existing["authorized_closer"]
+                ):
+                    raise MemoryIntegrityError(
+                        f"Sibyl intervention incident is invalid: {recorded_id}"
+                    )
+                if (
+                    historical_fields["source_session_id"]
+                    == normalized_signed_fields["source_session_id"]
+                ):
+                    raise MemoryIntegrityError(
+                        "this Sibyl source run already has a different intervention"
+                    )
+        if self.base_trust is not None and self.base_trust.status == "claimed":
+            recorded_ids = {
+                recorded
+                for existing in existing_lessons
+                for recorded in existing["applied_intervention_ids"]
+            }
+            if recorded_ids and incident_id not in recorded_ids:
+                raise MemoryIntegrityError(
+                    "activate the first Base-backed intervention before recording another"
+                )
         incident_summary = str(record.get("incident_summary", ""))
         incident_body = {
             "incident_id": incident_id,
@@ -902,14 +1194,11 @@ class InterventionMemory:
         return validated
 
     def matching_lessons(self, task_class: str, area: str, agent_family: str) -> list[dict[str, Any]]:
+        lessons = self._load_all_lessons()
+        if task_class == "release":
+            self._verify_base_trust(lessons, require_memory=True)
         matches = []
-        for source_agent in _SUPPORTED_AGENTS:
-            lesson_id = f"release-release_workflow-{source_agent.lower()}"
-            try:
-                entity = self.client.get_entity(self.LESSON_CATEGORY, lesson_id)
-            except NotFoundError:
-                continue
-            lesson = validate_lesson(entity.get("body"))
+        for lesson in lessons:
             agent_scope = lesson.get("agent_scope", "same_agent")
             applies_to_agent = (
                 agent_scope == "all_supported"
@@ -925,17 +1214,28 @@ class InterventionMemory:
         return matches
 
     def all_lessons(self) -> list[dict[str, Any]]:
-        lessons: list[dict[str, Any]] = []
-        for source_agent in _SUPPORTED_AGENTS:
-            lesson_id = f"release-release_workflow-{source_agent.lower()}"
-            try:
-                entity = self.client.get_entity(self.LESSON_CATEGORY, lesson_id)
-            except NotFoundError:
-                continue
-            lesson = validate_lesson(entity.get("body"))
-            if lesson["repo_id"] == self.repo_id:
-                lessons.append(lesson)
-        return sorted(lessons, key=lambda lesson: lesson["lesson_id"])
+        lessons = self._load_all_lessons()
+        self._verify_base_trust(
+            lessons,
+            require_memory=self.base_trust is not None
+            and self.base_trust.status == "active",
+        )
+        return lessons
+
+    def configured_release_argvs(self, agent_family: str) -> list[list[str]]:
+        """Return signed release shapes for candidate classification only.
+
+        This deliberately avoids a Base RPC call. The hook uses it only to
+        decide whether an action is potentially protected; the actual run and
+        policy are always verified against Base before an allow decision.
+        """
+
+        arguments: list[list[str]] = []
+        for lesson in self._load_all_lessons():
+            scope = lesson.get("agent_scope", "same_agent")
+            if scope == "all_supported" or lesson["agent_family"].lower() == agent_family.lower():
+                arguments.append(list(lesson["release_spec"]["argv"]))
+        return arguments
 
     @_serialized_mutation
     def record_pretool_decision(

@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from .identity import repository_identity
+from .identity import repository_configuration
 from .memory import InterventionMemory, MemoryIntegrityError
 from .policy import (
     classify_task,
@@ -143,13 +143,18 @@ def _pretool_result(
 
 def handle(event: dict[str, Any]) -> dict[str, Any] | None:
     cwd = event.get("cwd") or os.getcwd()
-    root, repo_id = repository_identity(str(cwd))
+    repository = repository_configuration(str(cwd))
+    root, repo_id = repository.root, repository.repo_id
     database = _database(root, event)
     # Every capability instruction carries the same absolute database chosen
     # for this lifecycle event. The agent cannot silently switch to the CLI's
     # default store between recall and enforcement.
     event["_comeback_memory_db"] = str(database)
-    memory = InterventionMemory(database, repo_id)
+    memory = InterventionMemory(
+        database,
+        repo_id,
+        base_trust=repository.base_trust,
+    )
     session_id = str(event.get("session_id", ""))
     event_name = event.get("hook_event_name")
 
@@ -195,16 +200,15 @@ def handle(event: dict[str, Any]) -> dict[str, Any] | None:
             preliminary_run = memory.get_run(session_id)
         except MemoryIntegrityError:
             preliminary_run = None
-        candidate_lessons = memory.matching_lessons(
-            "release", "release_workflow", _agent_family(event)
-        )
         configured_raw_action = any(
             invokes_configured_argv(
                 release_command,
-                lesson["release_spec"]["argv"],
+                release_argv,
                 working_directory=root,
             )
-            for lesson in candidate_lessons
+            for release_argv in memory.configured_release_argvs(
+                _agent_family(event)
+            )
         )
     if event_name == "PreToolUse" and (
         is_release_action(event)

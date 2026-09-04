@@ -3,11 +3,13 @@ from __future__ import annotations
 import getpass
 import json
 import os
+import re
 from pathlib import Path
 from typing import Any
 
 from eth_account import Account
 from eth_account.messages import encode_defunct
+from eth_account.signers.local import LocalAccount
 
 from .memory import MemoryIntegrityError
 
@@ -46,33 +48,47 @@ def create_owner_interactive(path: Path) -> dict[str, str]:
     return create_owner(path, password)
 
 
-def owner_address(path: Path) -> str:
+def _read_keystore(path: Path) -> dict[str, Any]:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise MemoryIntegrityError(
             f"owner keystore is unavailable; run `comeback create-owner`: {path}"
         ) from exc
-    address = value.get("address") if isinstance(value, dict) else None
-    if not isinstance(address, str) or len(address) != 40:
+    if not isinstance(value, dict):
+        raise MemoryIntegrityError("owner keystore is invalid")
+    return value
+
+
+def _stored_owner_address(value: dict[str, Any]) -> str:
+    address = value.get("address")
+    if not isinstance(address, str) or re.fullmatch(r"[0-9a-fA-F]{40}", address) is None:
         raise MemoryIntegrityError("owner keystore address is invalid")
     return "0x" + address.lower()
 
 
-def sign_with_owner(path: Path, message: str, *, password: str | None = None) -> str:
-    try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise MemoryIntegrityError(
-            f"owner keystore is unavailable; run `comeback create-owner`: {path}"
-        ) from exc
+def owner_address(path: Path) -> str:
+    return _stored_owner_address(_read_keystore(path))
+
+
+def unlock_owner(path: Path, password: str | None = None) -> LocalAccount:
+    value = _read_keystore(path)
+    expected_address = _stored_owner_address(value)
     secret = password if password is not None else getpass.getpass(
         "Comeback owner-keystore password: "
     )
     try:
         private_key = Account.decrypt(value, secret)
-    except (ValueError, KeyError) as exc:
+        account = Account.from_key(private_key)
+    except (KeyError, TypeError, ValueError) as exc:
         raise MemoryIntegrityError("owner keystore password or file is invalid") from exc
-    return Account.sign_message(
-        encode_defunct(text=message), private_key=private_key
-    ).signature.hex()
+    if account.address.lower() != expected_address:
+        raise MemoryIntegrityError(
+            "owner keystore address does not match its encrypted private key"
+        )
+    return account
+
+
+def sign_with_owner(path: Path, message: str, *, password: str | None = None) -> str:
+    account = unlock_owner(path, password=password)
+    return account.sign_message(encode_defunct(text=message)).signature.hex()

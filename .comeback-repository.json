@@ -1,5 +1,17 @@
 {
-  "digest": "97568eeaba53b6eb508c394ccde936ee7028d777dc9a1104aa91fbaeb4956943",
+  "base_trust": {
+    "anchor_key": "0xece2ff579741214875c5d538ef377f354b950943df2c9ee712a4d58437f2be8b",
+    "chain_id": 84532,
+    "claim_block_number": 46388566,
+    "claim_tx_hash": "0x422a775ad53d75e73981613194aa15d6afefbf2148a6034fef0dc5edea4b3a44",
+    "nonce": "0x219ce5b469057f9091b7b8c172c0ef9b965d5796e723a38332f60cd93b2d38a5",
+    "owner_address": "0x4fb0de16ab55cc33794c2c069e71b8c730de9966",
+    "registry_address": "0xe3c2d2a801904fa8c0d6c4456a6bec853dfcffda",
+    "required": true,
+    "runtime_code_hash": "0xa28c086af9980458acb83e005846259ea3cf3402320710d271188327d1922c81",
+    "status": "claimed"
+  },
+  "digest": "abaeea429fd6061836c2aabbd3fddf9aea849b988285c4cdbef55f0c2ff6d036",
   "repo_id": "9e9365d9456ae9aae5faeafa",
-  "schema": 1
+  "schema": 2
 }
