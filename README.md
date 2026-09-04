@@ -42,6 +42,12 @@ comeback init --agent codex
 
 If `winget` is unavailable, use one of the other Windows installation methods in the official `uv` documentation linked above. Python, `pipx`, and `python3-venv` do not need to be installed separately when `uv` manages Python.
 
+If `uv` reports a Windows hardlink failure such as `ERROR_CLOUD_FILE_INCOMPATIBLE_HARDLINKS` or OS error 396, select copy mode and rerun only the failed `uv` command:
+
+```powershell
+$env:UV_LINK_MODE = "copy"
+```
+
 ## Install on macOS or Linux
 
 Install `uv` using its official installer or package-manager instructions, then run:
@@ -69,6 +75,8 @@ git diff --cached -- .comeback-repository.json .agents/skills/release-safety/SKI
 git commit -m "Install Comeback repository policy"
 ```
 
+`comeback init` adds the `.comeback/` ignore rule but does not create that runtime directory. The first memory or owner write creates it. If you need the directory earlier for an intervention record or a disposable local release target, create it explicitly with `mkdir -p .comeback` on macOS/Linux or `New-Item -ItemType Directory -Force .comeback | Out-Null` in PowerShell.
+
 The committed `.comeback-repository.json` is the stable repository identity. Comeback deliberately refuses activation when that anchor is missing, uncommitted, or differs from the copy at `HEAD`.
 
 Comeback merges unrelated entries in an existing **untracked** hook configuration. It refuses a requested `.codex/hooks.json` or `.claude/settings.json` that Git already tracks, because the current launcher contains machine- and clone-absolute executable paths. The refusal happens before Comeback writes installation files; it does not silently untrack, move, or rewrite the tracked configuration.
@@ -92,9 +100,9 @@ Installation does not prove activation. Codex ignores project-local hook configu
 comeback doctor --agent codex
 ```
 
-The doctor consumes two authenticated Codex turns in two genuinely fresh, ephemeral processes and does not bypass hook trust. The first process is read-only and must create exactly one Sibyl run through the real `UserPromptSubmit` hook. The second uses a separate isolated Sibyl database and a disposable file under the ignored `.comeback/` directory; it must recall a seeded intervention, emit one exact `PreToolUse` denial, and leave the disposable release marker absent. `PASS` therefore proves activation and a real pre-execution block, not the full owner-approved release journey.
+The doctor consumes two authenticated Codex turns in two genuinely fresh, ephemeral processes and does not bypass hook trust. The first process is read-only and must create exactly one Sibyl run through the real `UserPromptSubmit` hook. The second uses a separate isolated Sibyl database and a disposable file under the ignored `.comeback/` directory; it must recall a seeded intervention, emit one exact `PreToolUse` denial, and leave the disposable release marker absent. `PASS` therefore proves activation and a real pre-execution block, not the full owner-approved release journey. Both diagnostic databases are temporary and deliberately separate from `.comeback/memory.db`, so `comeback status` will still report `NO_WORKING_AGENT_RUNS` immediately after a passing doctor. That is expected until the next genuinely fresh working agent session writes the first real run.
 
-Never invoke `comeback-hook` yourself. It is a lifecycle protocol endpoint that expects structured JSON from the agent. Zero Sibyl runs means the hooks are inactive, regardless of whether installation or a direct launcher test succeeded. If `comeback status` shows `NO_AGENT_HOOK_RUNS`, do not attempt a release: run the doctor, fix the reported trust or installation issue, and start a new agent process.
+Never invoke `comeback-hook` yourself. It is a lifecycle protocol endpoint that expects structured JSON from the agent. `NO_WORKING_AGENT_RUNS` means only that the primary store has no real working-session run; it does not erase a passing doctor result because the doctor uses isolated stores. If the doctor has not passed, run it and fix the reported trust or installation issue. After `PASS`, start a genuinely fresh working agent process, then use `comeback status` to obtain that real session ID.
 
 See the [official Codex hooks documentation](https://developers.openai.com/codex/hooks) for the project-layer and hook-review model.
 
@@ -107,6 +115,20 @@ comeback doctor --agent claude
 ```
 
 Claude doctor intentionally returns `PARTIAL`: it proves the installed Git Bash launcher, lifecycle JSON, and Sibyl write, but it does not claim that a real Claude Code process dispatched the hook. The authenticated `scripts/run_cross_agent_gate.py` and `scripts/run_claude_unlock_gate.py` checks are separate and are required before making the cross-agent claim. Consequently, `comeback doctor --agent both` also remains `PARTIAL` when Codex passes and only the Claude launcher has been proven.
+
+## Optional credential-free Windows release target
+
+For a disposable local test that does not require a GitHub account or credentials, create an absolute bare-repository target inside the ignored runtime directory:
+
+```powershell
+New-Item -ItemType Directory -Force .comeback | Out-Null
+$remote = Join-Path (Get-Location) ".comeback\local-release.git"
+git init --bare $remote
+$remote = (Resolve-Path $remote).Path.Replace('\', '/')
+$remote
+```
+
+Use the printed absolute path directly wherever the examples below use an HTTPS URL. For example, construct the signed release arguments with `$release = @("git", "push", $remote, "HEAD:refs/heads/approved") | ConvertTo-Json -Compress`. Do not use the literal name `$remote` inside a coding-agent prompt; it is only a variable in the operator's current PowerShell session. Verify that a denied release left no ref, and that an approved release created one, with `git --git-dir=$remote rev-parse --verify refs/heads/approved`.
 
 ## Record the first intervention
 
@@ -124,7 +146,7 @@ comeback create-owner
 
 Run owner, signing, approval, and reconciliation commands yourself in a native terminal—not through the coding agent. `comeback create-owner` asks you to enter and confirm a new password. That password encrypts only `.comeback/owner-keystore.json`, the local key used to sign interventions, approvals, and reconciliations. It is not a Sibyl password, Codex password, funded wallet password, or Base transaction password. The generated address does not need ETH.
 
-Prepare one intervention using commands that can execute directly without `&&`, pipes, redirection, or a shell interpreter. Store the prepared record inside ignored `.comeback/` so it does not make the checkpoint dirty. Use a direct HTTPS Git URL with no embedded username or token and an explicit source-to-destination refspec; do not sign a mutable remote name such as `origin`.
+Prepare one intervention using commands that can execute directly without `&&`, pipes, redirection, or a shell interpreter. Store the prepared record inside ignored `.comeback/` so it does not make the checkpoint dirty. For a real Git release, use a direct HTTPS URL with no embedded username or token. For credential-free local validation, use the absolute path to a disposable bare repository. In both cases use an explicit source-to-destination refspec; do not sign a mutable remote name such as `origin`.
 
 macOS or Linux example:
 
@@ -157,7 +179,7 @@ $record = comeback prepare-intervention `
 comeback intervene --record-file .comeback\intervention.json
 ```
 
-Replace the interpreter path, repository URL, and destination branch with the real values before signing. Git may use the operating system's credential helper at execution time, but credentials must not appear in the signed URL or argument array.
+Replace the interpreter path, release target, and destination branch with the real values before signing. Git may use the operating system's credential helper at execution time, but credentials must not appear in the signed URL or argument array.
 
 `comeback intervene` prints the complete structured record to the terminal and requires you to type `SIGN` before it asks for the owner-keystore password. Read the repository, source session, agent scope, checkpoint arguments, release arguments, and authorized closer before confirming. External ERC-191 signers remain available through `--authorized-closer` and `--signature`, but they are an advanced path rather than an installation prerequisite.
 

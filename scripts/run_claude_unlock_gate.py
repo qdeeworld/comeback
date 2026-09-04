@@ -77,11 +77,11 @@ def _run_claude(
     ]
     if tools is not None:
         command.extend(["--tools", tools])
-    command.append(prompt)
     return subprocess.run(
         command,
         cwd=root,
         env=environment,
+        input=prompt,
         capture_output=True,
         text=True,
         timeout=timeout,

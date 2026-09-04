@@ -117,6 +117,8 @@ def test_codex_doctor_proves_real_fresh_process_without_trust_bypass(
     assert check["enforcement"]["side_effect_absent"] is True
     assert check["enforcement"]["pretool_denials"] == 1
     assert agent_processes == 2
+    assert "isolated Sibyl stores" in result["next"]
+    assert "comeback status" in result["next"]
 
 
 def test_codex_doctor_reports_untrusted_project_without_claiming_activation(

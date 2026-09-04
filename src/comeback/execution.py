@@ -809,6 +809,49 @@ def _barrier_paths(lock_path: Path, nonce: str) -> tuple[Path, Path]:
     )
 
 
+def _runner_launch_command(
+    *,
+    ready: Path,
+    start: Path,
+    token: str,
+    wait_seconds: int,
+    command: list[str],
+) -> list[str]:
+    if os.name == "nt":
+        # A Windows virtual environment's python.exe is a redirector: it starts
+        # the base interpreter as a child and waits for it. Popen therefore
+        # reports the redirector PID, while os.getpid() in comeback.runner is
+        # the child PID. Launch this stdlib-only runner with the base executable
+        # directly so the readiness PID remains the exact Popen identity.
+        base_executable = getattr(sys, "_base_executable", None)
+        if not isinstance(base_executable, str) or not base_executable:
+            raise MemoryIntegrityError(
+                "Windows Python has no base executable for the release runner"
+            )
+        interpreter = Path(base_executable).resolve()
+        runner_script = Path(__file__).with_name("runner.py").resolve()
+        if not interpreter.is_file() or not runner_script.is_file():
+            raise MemoryIntegrityError(
+                "Windows release runner executable or script is unavailable"
+            )
+        prefix = [str(interpreter), "-I", str(runner_script)]
+    else:
+        prefix = [sys.executable, "-I", "-m", "comeback.runner"]
+    return [
+        *prefix,
+        "--ready",
+        str(ready),
+        "--start",
+        str(start),
+        "--token",
+        token,
+        "--wait-seconds",
+        str(wait_seconds),
+        "--",
+        *command,
+    ]
+
+
 def _wait_for_runner_ready(
     process: subprocess.Popen[str], ready_path: Path, *, timeout: float = 10
 ) -> None:
@@ -865,22 +908,13 @@ def _run_contained_command(
     token = uuid.uuid4().hex
     ready = control / f"{token}.ready"
     start = control / f"{token}.start"
-    runner_command = [
-        sys.executable,
-        "-I",
-        "-m",
-        "comeback.runner",
-        "--ready",
-        str(ready),
-        "--start",
-        str(start),
-        "--token",
-        token,
-        "--wait-seconds",
-        "120",
-        "--",
-        *command,
-    ]
+    runner_command = _runner_launch_command(
+        ready=ready,
+        start=start,
+        token=token,
+        wait_seconds=120,
+        command=command,
+    )
     popen_options: dict[str, Any] = {}
     if os.name == "nt":
         popen_options["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
@@ -1084,22 +1118,13 @@ def execute_release(
             root,
             _pinned_release_command(run, repository_head=head_after),
         )
-        runner_command = [
-            sys.executable,
-            "-I",
-            "-m",
-            "comeback.runner",
-            "--ready",
-            str(ready_path),
-            "--start",
-            str(start_path),
-            "--token",
-            lock_record["nonce"],
-            "--wait-seconds",
-            str(max(120, effective_timeout)),
-            "--",
-            *command,
-        ]
+        runner_command = _runner_launch_command(
+            ready=ready_path,
+            start=start_path,
+            token=lock_record["nonce"],
+            wait_seconds=max(120, effective_timeout),
+            command=command,
+        )
         popen_options: dict[str, Any] = {}
         if os.name == "nt":
             popen_options["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP

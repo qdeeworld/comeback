@@ -1,13 +1,57 @@
 import json
+import subprocess
+from pathlib import Path
 
 import pytest
 
 from comeback.policy import classify_task
+from scripts.run_claude_unlock_gate import _run_claude as _run_claude_unlock
 from scripts.run_claude_unlock_gate import (
     _fresh_capability_prompt,
     _permission_denials,
     _valid_sibyl_capability_trace,
 )
+from scripts.run_cross_agent_gate import _run_claude as _run_claude_cross_agent
+
+
+@pytest.mark.parametrize(
+    "runner,tools",
+    [
+        (_run_claude_cross_agent, ""),
+        (_run_claude_cross_agent, "Bash"),
+        (_run_claude_unlock, ""),
+        (_run_claude_unlock, "Bash"),
+    ],
+)
+def test_claude_gate_sends_prompt_over_stdin_after_variadic_tools(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    runner,
+    tools: str,
+) -> None:
+    invocation: dict[str, object] = {}
+
+    def fake_run(command, **kwargs):
+        invocation["command"] = command
+        invocation["input"] = kwargs.get("input")
+        return subprocess.CompletedProcess(command, 0, stdout="{}", stderr="")
+
+    monkeypatch.setattr(runner.__globals__["subprocess"], "run", fake_run)
+    prompt = "PROMPT_MUST_NOT_BECOME_A_TOOL_NAME"
+
+    runner(
+        Path("claude"),
+        root=tmp_path,
+        environment={},
+        session_id="00000000-0000-4000-8000-000000000000",
+        prompt=prompt,
+        tools=tools,
+    )
+
+    assert invocation["input"] == prompt
+    assert prompt not in invocation["command"]
+    tools_index = invocation["command"].index("--tools")
+    assert invocation["command"][tools_index + 1] == tools
 
 
 def test_claude_unlock_prompt_is_release_classified_before_first_tool() -> None:

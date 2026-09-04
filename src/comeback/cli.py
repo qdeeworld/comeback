@@ -326,13 +326,14 @@ def main() -> None:
                 "runs": runs,
                 "lessons": memory.all_lessons(),
                 "inspected_at": utc_now(),
-                "health": "AGENT_HOOK_OBSERVED" if runs else "NO_AGENT_HOOK_RUNS",
+                "health": "AGENT_HOOK_OBSERVED" if runs else "NO_WORKING_AGENT_RUNS",
                 "next": (
                     "Use the exact session_id when recording an intervention."
                     if runs
-                    else "No lifecycle hook has reached Sibyl. Do not release and do not invoke "
-                    "comeback-hook manually. Run `comeback doctor`, then start a genuinely fresh "
-                    "agent session in this repository."
+                    else "No working-session hook has reached the selected Sibyl store. Diagnostic "
+                    "runs from `comeback doctor` use isolated stores and never appear here. Do not "
+                    "release or invoke comeback-hook manually. If the doctor has not passed, run it; "
+                    "after PASS, start a genuinely fresh working agent session in this repository."
                 ),
             }
         elif args.command == "prepare-intervention":

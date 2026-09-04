@@ -178,11 +178,13 @@ def test_empty_status_explains_hook_recovery(tmp_path: Path, monkeypatch):
     selected = tmp_path / "diagnostic-memory.db"
     monkeypatch.setenv("COMEBACK_MEMORY_DB", str(selected))
     status = run_cli(tmp_path, "status")
-    assert status["health"] == "NO_AGENT_HOOK_RUNS"
+    assert status["health"] == "NO_WORKING_AGENT_RUNS"
     assert status["memory_database"] == str(selected.resolve())
     assert status["memory_override_active"] is True
     assert "comeback doctor" in status["next"]
-    assert "do not invoke comeback-hook manually" in status["next"]
+    assert "isolated stores" in status["next"]
+    assert "after PASS" in status["next"]
+    assert "invoke comeback-hook manually" in status["next"]
 
 
 def test_relative_memory_environment_override_is_refused(tmp_path: Path, monkeypatch):

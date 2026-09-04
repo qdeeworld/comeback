@@ -773,7 +773,8 @@ def diagnose_repository(repo: str | Path, *, agents: tuple[str, ...] = ("codex",
         "checks": checks,
         "errors": errors,
         "next": (
-            "Codex activation is proven in a fresh read-only process; start a new working session."
+            "Codex activation is proven. Doctor runs use isolated Sibyl stores and do not appear "
+            "in `comeback status`; start a genuinely fresh working session next."
             if not errors and agents == ("codex",)
             else (
                 "The requested checks completed; inspect each agent's verification scope."
