@@ -100,6 +100,10 @@ Activation was sent only after [candidate CI run 33912626658](https://github.com
 
 Comeback verified the activation sender, target, calldata, receipt, canonical block, safe-head inclusion, deployed runtime, exact anchored intervention and resulting contract state before writing the schema-2 `active` transition. The committed active configuration makes the initial Sibyl intervention mandatory: missing, substituted, corrupt, or incorrectly signed memory now blocks protected release work rather than returning to autonomous mode.
 
+- Active configuration commit: `bb94ea1ccdbb6240c82b2a484781bd9c249f7450`
+- CI for the active configuration: [GitHub Actions run 33913899687](https://github.com/qdeeworld/comeback/actions/runs/33913899687), with the Base contract and Ubuntu/native-Windows Python 3.12/3.13 jobs all passing
+- Active-memory journey: [founder-operated ablation and autonomy-evolution evidence](active-memory-gate-2026-09-04.md)
+
 ## Trust and RPC boundaries
 
 The anchor is owner-specific trust on first use, not a globally canonical repository-ownership record. Because the key includes the repository ID, nonce, and owner, another wallet can create a parallel anchor. The committed repository configuration selects the expected one.

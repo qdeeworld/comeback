@@ -9,7 +9,7 @@ This repository is a bounded Sibyl hackathon validation spike, not a production 
 1. A developer records a signed intervention after an agent skips a required release check.
 2. Sibyl stores the intervention, command specifications, provenance, outcome counts, and current supervision mode.
 3. The process ends.
-4. A fresh Codex or Claude Code session receives only a related release request.
+4. A fresh supported-agent session receives only a related release request. Codex has current authenticated evidence; claim Claude Code only after the separate authenticated gates pass on the installed Claude version.
 5. Comeback recalls the intervention and selects `HUMAN_REQUIRED`, `CHECKPOINTED`, or `AUTONOMOUS`.
 6. Its hook denies recognized raw release commands; the one exact release argument vector recorded in the intervention can run through a one-shot Comeback capability after its requirements pass.
 7. The result is written back to Sibyl, changing the next fresh session's supervision mode.
@@ -19,7 +19,7 @@ Unrelated low-risk work remains `AUTONOMOUS`.
 ## Prerequisites
 
 - Git and a Git repository with at least one commit.
-- An installed and authenticated coding agent. Codex CLI `0.152.1` is the version exercised by the authenticated gate. The externally reported `0.150.0-alpha.12.2` Windows build is not supported; regardless of version, `comeback doctor` must prove real lifecycle activation before use.
+- An installed and authenticated coding agent. Codex CLI `0.152.1` and `0.153.1` are exercised by authenticated gates. The externally reported `0.150.0-alpha.12.2` Windows build is not supported; regardless of version, `comeback doctor` must prove real lifecycle activation before use.
 - [`uv`](https://docs.astral.sh/uv/getting-started/installation/). It can install the required Python automatically.
 - Git Bash only when using Claude Code on Windows.
 
@@ -183,7 +183,7 @@ Replace the interpreter path, release target, and destination branch with the re
 
 `comeback intervene` prints the complete structured record to the terminal and requires you to type `SIGN` before it asks for the owner-keystore password. Read the repository, source session, agent scope, checkpoint arguments, release arguments, and authorized closer before confirming. External ERC-191 signers remain available through `--authorized-closer` and `--signature`, but they are an advanced path rather than an installation prerequisite.
 
-New interventions default to `--agent-scope all_supported`, so a Codex correction can supervise Claude Code and vice versa. Use `--agent-scope same_agent` when appropriate. The scope, checkpoint command, release command, timeouts, repository identity, and authorized closer are all signed.
+New interventions default to `--agent-scope all_supported`, which makes a Codex correction eligible for Claude Code recall and vice versa. Treat that as a cross-agent claim only after the authenticated Claude gates pass on the installed version; the current candidate's authenticated end-to-end evidence is Codex. Use `--agent-scope same_agent` when appropriate. The scope, checkpoint command, release command, timeouts, repository identity, and authorized closer are all signed.
 
 ## Fresh supervised session
 
@@ -263,6 +263,14 @@ Claim-first setup is also accepted, but `comeback doctor` then reports `BASE_INT
 This is owner-specific trust on first use, not a global repository-ownership registry. The contract key includes the repository ID, nonce, and owner, so multiple wallets can create parallel anchors; the committed `.comeback-repository.json` selects the one this repository expects. The anchor detects substitution of that selected owner and, after activation, loss or alteration of the anchored initial Sibyl incident. It does not make arbitrary Sibyl state changes by the same operating-system user tamper-proof, attest that later outcome counters are truthful, isolate release credentials, or stop someone who can rewrite both the repository and its trusted Git history.
 
 Comeback uses the official Base Sepolia endpoint by default. A custom `--rpc-url` must use HTTPS unless it is loopback, but it is still one trusted provider: a malicious or compromised endpoint could fabricate the chain view supplied to Comeback. Use independent chain evidence when that trust assumption is unacceptable.
+
+An active Base anchor makes its onchain check part of every protected checkpoint and release preflight. Codex's `workspace-write` sandbox disables network access unless it is enabled explicitly, so start the fresh supervised Codex process with:
+
+```bash
+codex --strict-config -c 'sandbox_workspace_write.network_access=true' --sandbox workspace-write
+```
+
+This grants network access to the agent sandbox; it does not bypass Comeback hooks or Codex approvals. Review that tradeoff before using it. If the Base RPC is unavailable or network access remains disabled, Comeback refuses the protected capability without minting a checkpoint receipt or executing the release. After changing this setting, start a genuinely fresh Codex session rather than reusing the failed one. Low-risk work does not require this Base preflight.
 
 ## Security boundary
 
