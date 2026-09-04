@@ -31,6 +31,17 @@ def _open_runner_barrier(path: Path, token: str) -> None:
     _open_start_barrier(path, token)
 
 
+def _publish_adversarial_barrier(path: Path, payload: bytes) -> None:
+    """Atomically publish bytes that the trusted producer would never emit."""
+
+    temporary = path.with_name(f".{path.name}.adversarial.tmp")
+    try:
+        temporary.write_bytes(payload)
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 def _wait_for(path: Path, timeout: float = 10) -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -79,9 +90,18 @@ def test_runner_cannot_execute_target_before_start_barrier(tmp_path: Path):
             process.wait(timeout=10)
 
 
-@pytest.mark.parametrize("published_token", ["wrong", " expected ", "expected\r"])
+@pytest.mark.parametrize(
+    "published_payload",
+    [
+        b"wrong\n",
+        b" expected \n",
+        b"expected\r\n",
+        b"expected",
+        b"expected\nextra\n",
+    ],
+)
 def test_runner_rejects_noncanonical_start_token(
-    tmp_path: Path, published_token: str
+    tmp_path: Path, published_payload: bytes
 ):
     ready = tmp_path / "runner.ready"
     start = tmp_path / "runner.start"
@@ -103,7 +123,7 @@ def test_runner_rejects_noncanonical_start_token(
     )
     try:
         _wait_for(ready)
-        _open_runner_barrier(start, published_token)
+        _publish_adversarial_barrier(start, published_payload)
         _, stderr = process.communicate(timeout=20)
         assert process.returncode == 126
         assert "start barrier token is invalid" in stderr
