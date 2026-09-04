@@ -1,6 +1,6 @@
 # Comeback Base Sepolia evidence — 2026-09-04
 
-Evidence level: public onchain transactions plus founder-operated local verification. This document does not claim production security, user adoption, or a completed activation.
+Evidence level: public onchain transactions plus founder-operated local verification. This document does not claim production security or user adoption.
 
 ## Bounded role
 
@@ -32,7 +32,73 @@ The immutable contract has no administrator, proxy, owner rotation, payable entr
 - Claim block: `46388566`
 - Claim block hash: `0x732d80ddbdc0fb108382f45a58c7cdca309501e00eb6e26949e023713013cc55`
 
-The claim transaction succeeded onchain and entered Base's `safe` chain view. Comeback then verified its sender, target, calldata, receipt, canonical block, deployed runtime, and inactive claimed state before writing the schema-2 `claimed` transition to `.comeback-repository.json`. Activation has not yet been sent, and no initial intervention identifier is represented as active onchain. Later evidence must record the separate safe-verified activation transaction before describing Base trust as active.
+The claim transaction succeeded onchain and entered Base's `safe` chain view. Comeback then verified its sender, target, calldata, receipt, canonical block, deployed runtime, and inactive claimed state before writing the schema-2 `claimed` transition to `.comeback-repository.json`.
+
+## Initial Sibyl intervention and activation
+
+- Source harness: Codex
+- Source session: `01a06dcc-aecd-7b30-9870-64727c79583e`
+- Incident time: `2026-09-04T19:03:05.029891+00:00`
+- Agent scope: all supported harnesses
+- Initial mode: `HUMAN_REQUIRED`
+- Required evidence: `release_check_passed`, then `human_approval`
+- Intervention identifier: `4db3b1f830535c258a896ab30935da6addd2ed8c811d5a5e4338cba117e98b52`
+- Owner signature: `1ce95e928f3ca410b353b95524187dadf26ba43851dd70707bfd640e51cafbb4062adb77d1f56d28245460185f88a257909801c40e4e9109e4efe73d4f0904811b`
+
+The identifier is `sha256("Comeback intervention v1\n" + canonical_json(signed_fields))`. These are the complete signed fields, allowing the commitment and recovered owner to be independently checked:
+
+```json
+{
+  "action_schema": 2,
+  "agent_family": "Codex",
+  "agent_scope": "all_supported",
+  "area": "release_workflow",
+  "authorized_closer": "0x4fb0de16ab55cc33794c2c069e71b8c730de9966",
+  "checkpoint_spec": {
+    "argv": [
+      "/Users/qdee/Projects/comeback-spike/.venv/bin/python",
+      "-m",
+      "pytest",
+      "-q"
+    ],
+    "timeout_seconds": 600
+  },
+  "incident_at": "2026-09-04T19:03:05.029891+00:00",
+  "lesson_id": "release-release_workflow-codex",
+  "release_spec": {
+    "argv": [
+      "git",
+      "push",
+      "/Users/qdee/Projects/comeback-spike/.comeback/local-release.git",
+      "HEAD:refs/heads/approved"
+    ],
+    "timeout_seconds": 120
+  },
+  "repo_id": "9e9365d9456ae9aae5faeafa",
+  "required_evidence": [
+    "release_check_passed",
+    "human_approval"
+  ],
+  "severity": "release_blocker",
+  "source_session_id": "01a06dcc-aecd-7b30-9870-64727c79583e",
+  "state_policy": {
+    "bind_head": true,
+    "require_clean_git": true
+  },
+  "task_class": "release"
+}
+```
+
+Activation was sent only after [candidate CI run 33912626658](https://github.com/qdeeworld/comeback/actions/runs/33912626658) passed Foundry plus Ubuntu and native Windows on Python 3.12 and 3.13, including the repeated full suite, the fresh-session Sibyl replay, and installed platform-shell hooks.
+
+- Activation transaction: [`0x0b578e80bff3f87aa02e8dd4a04cc2956ec35e60d2ddc0dba0eab409ee1b7003`](https://sepolia.basescan.org/tx/0x0b578e80bff3f87aa02e8dd4a04cc2956ec35e60d2ddc0dba0eab409ee1b7003)
+- Activation block: `46391536`
+- Activation block hash: `0x2867a6708e51eefef70730713ea911b7cb029e0a955c9bc14adb593393879f1b`
+- Activation timestamp: `2026-09-04T19:49:20Z`
+- Gas used: `53890`
+- Safe head observed before the local transition: `46391722`
+
+Comeback verified the activation sender, target, calldata, receipt, canonical block, safe-head inclusion, deployed runtime, exact anchored intervention and resulting contract state before writing the schema-2 `active` transition. The committed active configuration makes the initial Sibyl intervention mandatory: missing, substituted, corrupt, or incorrectly signed memory now blocks protected release work rather than returning to autonomous mode.
 
 ## Trust and RPC boundaries
 
