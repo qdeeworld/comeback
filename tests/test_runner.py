@@ -25,6 +25,12 @@ def _runner_command(
     )
 
 
+def _open_runner_barrier(path: Path, token: str) -> None:
+    from comeback.execution import _open_start_barrier
+
+    _open_start_barrier(path, token)
+
+
 def _wait_for(path: Path, timeout: float = 10) -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -63,7 +69,7 @@ def test_runner_cannot_execute_target_before_start_barrier(tmp_path: Path):
         time.sleep(0.15)
         assert not marker.exists()
 
-        start.write_text(token + "\n", encoding="utf-8")
+        _open_runner_barrier(start, token)
         stdout, stderr = process.communicate(timeout=20)
         assert process.returncode == 0, (stdout, stderr)
         assert marker.read_text(encoding="utf-8") == "ran"
@@ -73,7 +79,10 @@ def test_runner_cannot_execute_target_before_start_barrier(tmp_path: Path):
             process.wait(timeout=10)
 
 
-def test_runner_rejects_wrong_start_token(tmp_path: Path):
+@pytest.mark.parametrize("published_token", ["wrong", " expected "])
+def test_runner_rejects_noncanonical_start_token(
+    tmp_path: Path, published_token: str
+):
     ready = tmp_path / "runner.ready"
     start = tmp_path / "runner.start"
     marker = tmp_path / "target-ran.txt"
@@ -94,7 +103,7 @@ def test_runner_rejects_wrong_start_token(tmp_path: Path):
     )
     try:
         _wait_for(ready)
-        start.write_text("wrong\n", encoding="utf-8")
+        _open_runner_barrier(start, published_token)
         _, stderr = process.communicate(timeout=20)
         assert process.returncode == 126
         assert "start barrier token is invalid" in stderr
@@ -103,6 +112,61 @@ def test_runner_rejects_wrong_start_token(tmp_path: Path):
         if process.poll() is None:
             process.kill()
             process.wait(timeout=10)
+
+
+def test_runner_rejects_visible_empty_start_barrier(tmp_path: Path):
+    ready = tmp_path / "runner.ready"
+    start = tmp_path / "runner.start"
+    marker = tmp_path / "target-ran.txt"
+    process = subprocess.Popen(
+        _runner_command(
+            ready,
+            start,
+            "expected",
+            [
+                sys.executable,
+                "-c",
+                f"from pathlib import Path; Path({str(marker)!r}).write_text('ran')",
+            ],
+        ),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        _wait_for(ready)
+        start.touch()
+        _, stderr = process.communicate(timeout=20)
+        assert process.returncode == 126
+        assert "start barrier token is invalid" in stderr
+        assert not marker.exists()
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait(timeout=10)
+
+
+def test_ready_record_retries_partial_writes(tmp_path: Path, monkeypatch) -> None:
+    from comeback import runner
+
+    ready = tmp_path / "runner.ready"
+    original_write = os.write
+    writes = 0
+
+    def partial_write(descriptor: int, payload: bytes) -> int:
+        nonlocal writes
+        writes += 1
+        return original_write(descriptor, payload[:1])
+
+    monkeypatch.setattr(runner.os, "write", partial_write)
+
+    runner._write_ready(ready)
+
+    assert json.loads(ready.read_text(encoding="utf-8")) == {
+        "process_id": os.getpid()
+    }
+    assert writes > 1
+    assert not ready.with_suffix(ready.suffix + ".tmp").exists()
 
 
 def test_windows_job_settling_rechecks_a_transient_process_count(monkeypatch):
@@ -156,7 +220,7 @@ import sys
 import time
 from pathlib import Path
 
-from comeback.execution import _runner_launch_command
+from comeback.execution import _open_start_barrier, _runner_launch_command
 
 ready, start, marker = map(Path, sys.argv[1:])
 assert sys.prefix != sys.base_prefix
@@ -187,7 +251,7 @@ assert ready.is_file(), process.communicate(timeout=5)
 assert json.loads(ready.read_text(encoding="utf-8")) == {
     "process_id": process.pid
 }
-start.write_text("go\\n", encoding="utf-8")
+_open_start_barrier(start, "go")
 stdout, stderr = process.communicate(timeout=20)
 assert process.returncode == 0, (stdout, stderr)
 assert marker.read_text(encoding="utf-8") == "ran"
@@ -214,7 +278,7 @@ assert marker.read_text(encoding="utf-8") == "ran"
         ready = tmp_path / "runner.ready"
         start = tmp_path / "runner.start"
         marker = tmp_path / "target-ran.txt"
-        start.write_text("go\n", encoding="utf-8")
+        _open_runner_barrier(start, "go")
 
         def fail_containment_setup():
             raise OSError("simulated Job setup failure")
@@ -259,7 +323,7 @@ assert marker.read_text(encoding="utf-8") == "ran"
             )
         )
         _wait_for(ready)
-        start.write_text("go\n", encoding="utf-8")
+        _open_runner_barrier(start, "go")
         process.wait(timeout=20)
         assert process.returncode == 124
         time.sleep(2.5)
@@ -289,7 +353,7 @@ assert marker.read_text(encoding="utf-8") == "ran"
             )
         )
         _wait_for(ready)
-        start.write_text("go\n", encoding="utf-8")
+        _open_runner_barrier(start, "go")
         _wait_for(child_ready)
         process.kill()
         process.wait(timeout=10)

@@ -560,31 +560,46 @@ def release_process_is_alive(lock: dict[str, Any]) -> bool:
     return wrapper_alive
 
 
+def _write_all(descriptor: int, payload: bytes) -> None:
+    offset = 0
+    while offset < len(payload):
+        try:
+            written = os.write(descriptor, payload[offset:])
+        except InterruptedError:
+            continue
+        if written <= 0:
+            raise OSError("atomic file write made no progress")
+        offset += written
+
+
 def _publish_lock(path: Path, record: dict[str, Any]) -> None:
     """Publish a complete lock atomically without an empty O_EXCL window."""
 
     temporary = path.with_name(f".{path.name}.{record['nonce']}.tmp")
     descriptor = os.open(temporary, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
     try:
-        os.write(
-            descriptor,
-            (json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n").encode(),
-        )
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
-    try:
-        # A hard link is an atomic create-if-absent publication on POSIX and
-        # NTFS. It never replaces another session's lock.
-        os.link(temporary, path)
-    except FileExistsError as exc:
-        raise MemoryIntegrityError(
-            "release scope is already executing or has an unresolved outcome"
-        ) from exc
-    except OSError as exc:
-        raise MemoryIntegrityError(
-            "release lock could not be published atomically on this filesystem"
-        ) from exc
+        try:
+            _write_all(
+                descriptor,
+                (
+                    json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n"
+                ).encode(),
+            )
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        try:
+            # A hard link is an atomic create-if-absent publication on POSIX and
+            # NTFS. It never replaces another session's lock.
+            os.link(temporary, path)
+        except FileExistsError as exc:
+            raise MemoryIntegrityError(
+                "release scope is already executing or has an unresolved outcome"
+            ) from exc
+        except OSError as exc:
+            raise MemoryIntegrityError(
+                "release lock could not be published atomically on this filesystem"
+            ) from exc
     finally:
         temporary.unlink(missing_ok=True)
 
@@ -603,14 +618,16 @@ def _update_release_lock(
     temporary = path.with_name(f".{path.name}.{current['nonce']}.update")
     descriptor = os.open(temporary, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
     try:
-        os.write(
-            descriptor,
-            (json.dumps(updated, sort_keys=True, separators=(",", ":")) + "\n").encode(),
-        )
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
-    try:
+        try:
+            _write_all(
+                descriptor,
+                (
+                    json.dumps(updated, sort_keys=True, separators=(",", ":")) + "\n"
+                ).encode(),
+            )
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
         if read_release_lock(root, repo_id) != expected:
             raise MemoryIntegrityError("release lock changed during capability execution")
         os.replace(temporary, path)
@@ -877,20 +894,21 @@ def _open_start_barrier(path: Path, nonce: str) -> None:
     temporary = path.with_name(f".{path.name}.{nonce}.tmp")
     descriptor = os.open(temporary, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
     try:
-        os.write(descriptor, (nonce + "\n").encode("utf-8"))
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
-    try:
-        # Publish only complete content. The runner can never observe the
-        # empty/partial window produced by writing the final path in place.
-        os.link(temporary, path)
-    except FileExistsError as exc:
-        raise MemoryIntegrityError("capability start barrier already exists") from exc
-    except OSError as exc:
-        raise MemoryIntegrityError(
-            "capability start barrier could not be published atomically"
-        ) from exc
+        try:
+            _write_all(descriptor, (nonce + "\n").encode("utf-8"))
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        try:
+            # Publish only complete content. The runner can never observe the
+            # empty/partial window produced by writing the final path in place.
+            os.link(temporary, path)
+        except FileExistsError as exc:
+            raise MemoryIntegrityError("capability start barrier already exists") from exc
+        except OSError as exc:
+            raise MemoryIntegrityError(
+                "capability start barrier could not be published atomically"
+            ) from exc
     finally:
         temporary.unlink(missing_ok=True)
 

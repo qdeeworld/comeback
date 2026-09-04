@@ -13,18 +13,33 @@ _WINDOWS_JOB_SETTLE_SECONDS = 0.5
 _WINDOWS_JOB_SETTLE_INTERVAL_SECONDS = 0.01
 
 
+def _write_all(descriptor: int, payload: bytes) -> None:
+    offset = 0
+    while offset < len(payload):
+        try:
+            written = os.write(descriptor, payload[offset:])
+        except InterruptedError:
+            continue
+        if written <= 0:
+            raise OSError("atomic file write made no progress")
+        offset += written
+
+
 def _write_ready(path: Path) -> None:
     temporary = path.with_suffix(path.suffix + ".tmp")
     descriptor = os.open(temporary, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
     try:
-        os.write(
-            descriptor,
-            (json.dumps({"process_id": os.getpid()}) + "\n").encode("utf-8"),
-        )
-        os.fsync(descriptor)
+        try:
+            _write_all(
+                descriptor,
+                (json.dumps({"process_id": os.getpid()}) + "\n").encode("utf-8"),
+            )
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        os.replace(temporary, path)
     finally:
-        os.close(descriptor)
-    os.replace(temporary, path)
+        temporary.unlink(missing_ok=True)
 
 
 def _windows_containment_job():
@@ -181,15 +196,16 @@ def run(
         kernel32, job = _windows_containment_job()
     _write_ready(ready)
     deadline = time.monotonic() + wait_seconds
+    expected_start = (token + "\n").encode("utf-8")
     while True:
         try:
-            start_value = start.read_text(encoding="utf-8").strip()
+            start_value = start.read_bytes()
         except FileNotFoundError:
             start_value = None
         except OSError as exc:
             raise RuntimeError("start barrier is unreadable") from exc
         if start_value is not None:
-            if start_value != token:
+            if start_value != expected_start:
                 raise RuntimeError("start barrier token is invalid")
             break
         if time.monotonic() >= deadline:

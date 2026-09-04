@@ -136,6 +136,57 @@ def test_start_barrier_is_not_visible_until_token_is_complete(
     assert barrier.read_text(encoding="utf-8") == token + "\n"
 
 
+def test_start_barrier_retries_partial_writes(tmp_path: Path, monkeypatch) -> None:
+    barrier = tmp_path / "start"
+    token = "partial-write-token"
+    original_write = os.write
+    writes = 0
+
+    def partial_write(descriptor: int, payload: bytes) -> int:
+        nonlocal writes
+        writes += 1
+        return original_write(descriptor, payload[:2])
+
+    monkeypatch.setattr(os, "write", partial_write)
+
+    _open_start_barrier(barrier, token)
+
+    assert barrier.read_bytes() == (token + "\n").encode("utf-8")
+    assert writes > 1
+    assert not barrier.with_name(f".{barrier.name}.{token}.tmp").exists()
+
+
+def test_start_barrier_removes_temporary_after_write_failure(
+    tmp_path: Path, monkeypatch
+) -> None:
+    barrier = tmp_path / "start"
+    token = "failed-write-token"
+
+    def fail_write(_descriptor: int, _payload: bytes) -> int:
+        raise OSError("simulated write failure")
+
+    monkeypatch.setattr(os, "write", fail_write)
+
+    with pytest.raises(OSError, match="simulated write failure"):
+        _open_start_barrier(barrier, token)
+
+    assert not barrier.exists()
+    assert not barrier.with_name(f".{barrier.name}.{token}.tmp").exists()
+
+
+def test_start_barrier_does_not_remove_unowned_temporary_file(tmp_path: Path) -> None:
+    barrier = tmp_path / "start"
+    token = "occupied-token"
+    temporary = barrier.with_name(f".{barrier.name}.{token}.tmp")
+    temporary.write_text("preexisting", encoding="utf-8")
+
+    with pytest.raises(FileExistsError):
+        _open_start_barrier(barrier, token)
+
+    assert temporary.read_text(encoding="utf-8") == "preexisting"
+    assert not barrier.exists()
+
+
 @pytest.mark.skipif(sys.platform != "darwin", reason="macOS native process identity")
 def test_macos_process_birth_token_does_not_spawn_ps(monkeypatch):
     monkeypatch.setattr(
