@@ -38,6 +38,16 @@ def test_missing_interpreter_never_falls_back_to_path(tmp_path):
         launcher_argv(tmp_path / "comeback.exe", "comeback.cli")
 
 
+def test_discovery_prefers_running_environment_over_exposed_uv_stub(tmp_path, monkeypatch):
+    hook = windows_environment(tmp_path)
+    exposed = tmp_path / "exposed" / "comeback-hook.exe"
+    exposed.parent.mkdir()
+    exposed.touch()
+    monkeypatch.setattr("comeback.installer.shutil.which", lambda _: str(exposed))
+    assert resolve_hook_executable(hook.with_name("python.exe")) == hook.resolve()
+    assert launcher_argv(resolve_hook_executable(hook.with_name("python.exe")), "comeback.hook")[0] == str(hook.with_name("python.exe"))
+
+
 def test_base_install_layout_and_broken_venv_refusal(tmp_path):
     scripts = tmp_path / "Scripts"
     scripts.mkdir()

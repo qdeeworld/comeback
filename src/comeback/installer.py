@@ -102,9 +102,6 @@ def _windows_hook_command(executable: str, *arguments: str) -> str:
 
 
 def resolve_hook_executable(python_executable: str | Path | None = None) -> Path:
-    discovered = shutil.which("comeback-hook")
-    if discovered:
-        return Path(discovered).resolve()
     # Keep the launcher path itself: virtual-environment Python binaries are
     # often symlinks, and resolving one would leave its sibling entry points.
     python = Path(python_executable or sys.executable).expanduser().absolute()
@@ -114,6 +111,9 @@ def resolve_hook_executable(python_executable: str | Path | None = None) -> Path
         for candidate in (base, base.with_suffix(".exe")):
             if candidate.exists():
                 return candidate.resolve()
+    discovered = shutil.which("comeback-hook")
+    if discovered:
+        return Path(discovered).resolve()
     raise RuntimeError("comeback-hook is not available on PATH or beside the active Python")
 
 
