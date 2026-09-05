@@ -23,6 +23,7 @@ except ModuleNotFoundError:  # pragma: no cover - Python 3.10 only
     import tomli as tomllib
 
 from .identity import BaseTrustConfig, repository_configuration
+from .installer import _is_comeback_handler
 from .memory import InterventionMemory, MemoryIntegrityError
 from .signing import intervention_message
 
@@ -83,7 +84,7 @@ def _comeback_handlers(path: Path, *, agent: str) -> dict[str, dict[str, Any]]:
             for handler in handlers:
                 if not isinstance(handler, dict):
                     continue
-                if "comeback-hook" not in str(handler.get("command", "")):
+                if not _is_comeback_handler(handler):
                     continue
                 if agent == "codex" and os.name == "nt" and not isinstance(
                     handler.get("commandWindows"), str

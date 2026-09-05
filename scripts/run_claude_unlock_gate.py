@@ -28,6 +28,7 @@ from comeback.installer import (
     resolve_hook_executable,
 )
 from comeback.memory import InterventionMemory
+from comeback.launcher import preflight_launcher
 from comeback.policy import classify_task
 from comeback.signing import approval_message, intervention_message
 
@@ -261,6 +262,9 @@ def run_gate() -> tuple[dict[str, Any], int]:
             raise RuntimeError("Claude Code was not found on PATH")
         claude = Path(discovered_claude)
         hook_executable = resolve_hook_executable()
+
+        phase = "launcher_preflight"
+        preflight_launcher(hook_executable)
 
         phase = "authentication"
         auth = subprocess.run(
