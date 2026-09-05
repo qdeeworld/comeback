@@ -298,6 +298,11 @@ def test_deep_path_checkpoint_and_release_capabilities():
 
 def test_cross_platform_checkpoint_and_release_capabilities(tmp_path: Path):
     memory, owner = _supervised_memory(tmp_path)
+    with memory:
+        _assert_checkpoint_and_release(tmp_path, memory, owner)
+
+
+def _assert_checkpoint_and_release(tmp_path: Path, memory, owner):
     checkpoint, checkpoint_exit = execute_checkpoint(
         memory, session_id="fresh", root=tmp_path
     )
