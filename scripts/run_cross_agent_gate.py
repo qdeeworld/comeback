@@ -19,6 +19,7 @@ from eth_account.messages import encode_defunct
 
 from comeback.identity import repository_identity
 from comeback.installer import install_repository, resolve_hook_executable
+from comeback.launcher import preflight_launcher
 from comeback.memory import InterventionMemory
 from comeback.signing import intervention_message
 
@@ -102,6 +103,9 @@ def run_gate() -> tuple[dict[str, Any], int]:
             raise RuntimeError("Claude Code was not found on PATH")
         claude = Path(discovered_claude)
         hook_executable = resolve_hook_executable()
+
+        phase = "launcher_preflight"
+        preflight_launcher(hook_executable)
 
         phase = "authentication"
         auth = subprocess.run(

@@ -51,6 +51,14 @@ $env:UV_LINK_MODE = "copy"
 
 If an earlier development install already failed, rerunning it can leave missing package metadata. Close processes using that environment, rename only the disposable `.uvenv` directory to an unused backup name, then recreate `.uvenv` and repeat the install with copy mode enabled. Preserve your repository and owner keystore. For a failed `uv tool install`, retry with `--force --link-mode copy`; the tool environment is separate from a development clone's `.uvenv`.
 
+### Windows application-control compatibility
+
+Windows hooks and signed capability commands use the installation's adjacent `python.exe -I -m comeback.hook` / `comeback.cli`, not the per-install console-script `.exe` stubs. `-I` isolates imports from repository files and Python environment variables. Re-run `init` and review/retrust the changed hooks after upgrading; existing hook files are not silently updated.
+
+Initialization and the authenticated Claude gates first probe the environment interpreter without starting an agent. A blocked or broken interpreter stops the workflow. This does **not** certify Smart App Control compatibility: Windows may also block Python or dependencies. Do not disable Windows security or keep retrying. Consult Code Integrity logs and use an administrator-approved Python distribution/environment. A signed interpreter is a candidate installation route, not a guarantee that all dependencies are accepted.
+
+If the `comeback.exe` console command itself is blocked, the same installed environment can be invoked explicitly as `PATH_TO_ENV\Scripts\python.exe -I -m comeback.cli --help` (then `init`), provided that interpreter is allowed. Do not substitute a different Python from PATH or assume the uv-managed interpreter is signed. The preflight reports launch failure; it does not label every permission error as Smart App Control without OS evidence.
+
 ## Install on macOS or Linux
 
 Install `uv` using its official installer or package-manager instructions, then run:

@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from .identity import ensure_repository_anchor
+from .launcher import launcher_argv, preflight_launcher
 
 
 def _git_output(root: Path, *arguments: str) -> subprocess.CompletedProcess[str]:
@@ -101,9 +102,6 @@ def _windows_hook_command(executable: str, *arguments: str) -> str:
 
 
 def resolve_hook_executable(python_executable: str | Path | None = None) -> Path:
-    discovered = shutil.which("comeback-hook")
-    if discovered:
-        return Path(discovered).resolve()
     # Keep the launcher path itself: virtual-environment Python binaries are
     # often symlinks, and resolving one would leave its sibling entry points.
     python = Path(python_executable or sys.executable).expanduser().absolute()
@@ -113,6 +111,9 @@ def resolve_hook_executable(python_executable: str | Path | None = None) -> Path
         for candidate in (base, base.with_suffix(".exe")):
             if candidate.exists():
                 return candidate.resolve()
+    discovered = shutil.which("comeback-hook")
+    if discovered:
+        return Path(discovered).resolve()
     raise RuntimeError("comeback-hook is not available on PATH or beside the active Python")
 
 
@@ -125,7 +126,7 @@ def cli_executable_for_hook(hook_executable: str | Path) -> Path:
 
 
 def hook_groups(executable: Path) -> dict[str, list[dict[str, Any]]]:
-    executable_path = str(executable.resolve())
+    launch = launcher_argv(executable, "comeback.hook")
     cli_path = str(cli_executable_for_hook(executable))
     # Pin the principal in the trusted launcher. Inherited environment must
     # never reclassify a Codex lifecycle event as another agent family.
@@ -136,10 +137,10 @@ def hook_groups(executable: Path) -> dict[str, list[dict[str, Any]]]:
         cli_path,
     )
     command = " ".join(
-        [_quote_command_part(executable_path)]
+        [_quote_command_part(part) for part in launch]
         + [_quote_command_part(argument) for argument in hook_arguments]
     )
-    command_windows = _windows_hook_command(executable_path, *hook_arguments)
+    command_windows = _windows_hook_command(*launch, *hook_arguments)
     return {
         "UserPromptSubmit": [
             {
@@ -178,7 +179,7 @@ def claude_hook_groups(executable: Path) -> dict[str, list[dict[str, Any]]]:
     command = " ".join(
         _quote_command_part(part)
         for part in (
-            str(executable.resolve()),
+            *launcher_argv(executable, "comeback.hook"),
             "--agent-family",
             "ClaudeCode",
             "--cli-executable",
@@ -199,7 +200,8 @@ def _is_comeback_handler(handler: Any) -> bool:
     if not isinstance(handler, dict):
         return False
     return any(
-        "comeback-hook" in str(handler.get(field, ""))
+        ("comeback-hook" in str(handler.get(field, ""))
+         or "comeback.hook" in str(handler.get(field, "")))
         for field in ("command", "commandWindows")
     )
 
@@ -327,6 +329,7 @@ def install_repository(
             "Comeback capability executable was not found beside the hook: "
             f"{capability_executable}"
         )
+    preflight_launcher(executable)
 
     hooks_path = root / ".codex" / "hooks.json"
     claude_settings_path = root / ".claude" / "settings.json"

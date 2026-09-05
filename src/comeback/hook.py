@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from .identity import repository_configuration
+from .launcher import launcher_argv
 from .memory import InterventionMemory, MemoryIntegrityError
 from .policy import (
     classify_task,
@@ -54,7 +55,7 @@ def capability_invocation(
         executable = Path(configured).expanduser()
         if not executable.is_absolute():
             raise MemoryIntegrityError("trusted capability executable must be absolute")
-        argv = [str(executable)]
+        argv = launcher_argv(executable, "comeback.cli")
     else:
         # Programmatic callers and the deterministic harness do not enter through
         # the installed console hook. Keep their launcher exact as well.
