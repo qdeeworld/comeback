@@ -33,6 +33,7 @@ Install `uv`, close and reopen PowerShell so `uv` is on `PATH`, then install Com
 winget install --id=astral-sh.uv -e --source winget --scope user
 # Close this PowerShell window, open a new one, then continue.
 uv python install 3.13
+$env:UV_LINK_MODE = "copy"
 uv tool install --python 3.13 "git+https://github.com/qdeeworld/comeback.git"
 uv tool update-shell
 # Close and reopen PowerShell again so `comeback` is on PATH.
@@ -42,11 +43,13 @@ comeback init --agent codex
 
 If `winget` is unavailable, use one of the other Windows installation methods in the official `uv` documentation linked above. Python, `pipx`, and `python3-venv` do not need to be installed separately when `uv` manages Python.
 
-If `uv` reports a Windows hardlink failure such as `ERROR_CLOUD_FILE_INCOMPATIBLE_HARDLINKS` or OS error 396, select copy mode and rerun only the failed `uv` command:
+Select copy mode **before the first install** on Windows. This avoids hardlink failures such as `ERROR_CLOUD_FILE_INCOMPATIBLE_HARDLINKS` or OS error 396, including failures in uv's cache outside OneDrive:
 
 ```powershell
 $env:UV_LINK_MODE = "copy"
 ```
+
+If an earlier development install already failed, rerunning it can leave missing package metadata. Close processes using that environment, rename only the disposable `.uvenv` directory to an unused backup name, then recreate `.uvenv` and repeat the install with copy mode enabled. Preserve your repository and owner keystore. For a failed `uv tool install`, retry with `--force --link-mode copy`; the tool environment is separate from a development clone's `.uvenv`.
 
 ## Install on macOS or Linux
 
@@ -300,6 +303,7 @@ uv pip install -e '.[dev]' --python .uvenv/bin/python
 Windows PowerShell:
 
 ```powershell
+$env:UV_LINK_MODE = "copy"
 uv venv .uvenv --python 3.13
 uv pip install -e ".[dev]" --python .uvenv\Scripts\python.exe
 .uvenv\Scripts\python.exe -m pytest -q
@@ -307,6 +311,8 @@ uv pip install -e ".[dev]" --python .uvenv\Scripts\python.exe
 .uvenv\Scripts\python.exe scripts\run_installed_hook_gate.py
 .uvenv\Scripts\python.exe scripts\run_codex_hook_gate.py
 ```
+
+This **development-clone** setup is separate from the earlier `uv tool install` user installation. For Claude on Windows, run the authenticated gates from Git Bash in a normal terminal outside any running Claude session. Use a short disposable clone path outside Claude's scratchpad; nested-session sandbox execution restrictions are not proof of a Comeback hook denial. In Git Bash, set `export UV_LINK_MODE=copy` before installing and use `.uvenv/Scripts/python.exe`.
 
 The deterministic gate proves five fresh-session denials, a simulated Codex-to-Claude scope transition, malicious-prompt resistance, low-risk autonomy, signed checkpoint/approval/release, evolving supervision, and memory ablation. The installed-hook gate uses the generated POSIX command for Claude and the generated `commandWindows` through native PowerShell and `cmd.exe` for Codex. The real Codex gate proves a real Codex source session and a separate fresh Codex denial. Its setup then completes a signed `HUMAN_REQUIRED` capability run directly before a final fresh Codex process exercises the evolved `CHECKPOINTED` capability; it is activation and enforcement evidence, not one unbroken all-agent-driven approval journey.
 

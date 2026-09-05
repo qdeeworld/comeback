@@ -2,6 +2,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -14,6 +15,7 @@ from eth_account.messages import encode_defunct
 
 from comeback.execution import (
     _open_start_barrier,
+    _start_barrier_temporary,
     _process_birth_token,
     _required_process_birth_token,
     _resolved_executable,
@@ -153,7 +155,7 @@ def test_start_barrier_retries_partial_writes(tmp_path: Path, monkeypatch) -> No
 
     assert barrier.read_bytes() == (token + "\n").encode("utf-8")
     assert writes > 1
-    assert not barrier.with_name(f".{barrier.name}.{token}.tmp").exists()
+    assert not _start_barrier_temporary(barrier, token).exists()
 
 
 def test_start_barrier_removes_temporary_after_write_failure(
@@ -171,13 +173,13 @@ def test_start_barrier_removes_temporary_after_write_failure(
         _open_start_barrier(barrier, token)
 
     assert not barrier.exists()
-    assert not barrier.with_name(f".{barrier.name}.{token}.tmp").exists()
+    assert not _start_barrier_temporary(barrier, token).exists()
 
 
 def test_start_barrier_does_not_remove_unowned_temporary_file(tmp_path: Path) -> None:
     barrier = tmp_path / "start"
     token = "occupied-token"
-    temporary = barrier.with_name(f".{barrier.name}.{token}.tmp")
+    temporary = _start_barrier_temporary(barrier, token)
     temporary.write_text("preexisting", encoding="utf-8")
 
     with pytest.raises(FileExistsError):
@@ -185,6 +187,34 @@ def test_start_barrier_does_not_remove_unowned_temporary_file(tmp_path: Path) ->
 
     assert temporary.read_text(encoding="utf-8") == "preexisting"
     assert not barrier.exists()
+
+
+def test_start_barrier_fits_when_legacy_staging_exceeds_windows_path_limit(
+    tmp_path: Path, monkeypatch
+) -> None:
+    token = "a" * 32
+    directory = tmp_path / ("d" * max(1, 145 - len(str(tmp_path))))
+    directory.mkdir()
+    barrier = directory / ("." + "b" * 64 + ".lock." + token + ".start")
+    legacy = barrier.with_name(f".{barrier.name}.{token}.tmp")
+    # Exercise the Windows path budget deterministically on every CI host.
+    limit = 260
+    assert len(str(barrier)) < limit
+    assert len(str(legacy)) >= limit
+    assert len(str(_start_barrier_temporary(barrier, token))) < limit
+    original_open = os.open
+
+    def bounded_open(path, *args, **kwargs):
+        if len(str(path)) >= limit:
+            raise FileNotFoundError(2, "simulated Windows path limit", str(path))
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", bounded_open)
+    with pytest.raises(FileNotFoundError):
+        os.open(legacy, execution_module._ATOMIC_WRITE_FLAGS, 0o600)
+    _open_start_barrier(barrier, token)
+    assert barrier.read_bytes() == (token + "\n").encode()
+    assert not _start_barrier_temporary(barrier, token).exists()
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="macOS native process identity")
@@ -258,8 +288,21 @@ def test_windows_native_executable_survives_truncated_pathext(tmp_path: Path, mo
     assert _resolved_executable(tmp_path, "release-tool") == expected
 
 
+def test_deep_path_checkpoint_and_release_capabilities():
+    # Exercise a realistic Windows user/temp prefix, not only CI's short cwd.
+    with tempfile.TemporaryDirectory(prefix="cb-path-") as temporary:
+        root = Path(temporary) / ("r" * max(1, 120 - len(temporary) - 1))
+        root.mkdir()
+        test_cross_platform_checkpoint_and_release_capabilities(root)
+
+
 def test_cross_platform_checkpoint_and_release_capabilities(tmp_path: Path):
     memory, owner = _supervised_memory(tmp_path)
+    with memory:
+        _assert_checkpoint_and_release(tmp_path, memory, owner)
+
+
+def _assert_checkpoint_and_release(tmp_path: Path, memory, owner):
     checkpoint, checkpoint_exit = execute_checkpoint(
         memory, session_id="fresh", root=tmp_path
     )
