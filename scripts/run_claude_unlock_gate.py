@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import re
 import os
 import shutil
 import subprocess
@@ -63,30 +65,34 @@ def _run_claude(
     prompt: str,
     tools: str | None = None,
     timeout: int = 300,
+    execution_trace: bool = False,
 ) -> subprocess.CompletedProcess[str]:
     command = [
         str(claude),
         "-p",
         "--output-format",
-        "json",
+        "stream-json" if execution_trace else "json",
         "--setting-sources",
         "project",
         "--dangerously-skip-permissions",
         "--session-id",
         session_id,
     ]
+    if execution_trace:
+        command.append("--verbose")
     if tools is not None:
         command.extend(["--tools", tools])
-    return subprocess.run(
-        command,
-        cwd=root,
-        env=environment,
-        input=prompt,
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-        check=False,
-    )
+    try:
+        return subprocess.run(
+            command, cwd=root, env=environment, input=prompt,
+            capture_output=True, text=True, timeout=timeout, check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        def decoded(value):
+            return value.decode("utf-8", errors="replace") if isinstance(value, bytes) else value or ""
+        return subprocess.CompletedProcess(
+            command, 124, decoded(exc.stdout), decoded(exc.stderr) + "\nClaude gate timed out"
+        )
 
 
 def _permission_denials(stdout: str) -> list[dict[str, Any]]:
@@ -141,10 +147,115 @@ def _valid_sibyl_capability_trace(decisions: list[dict[str, Any]]) -> bool:
     ]
 
 
+def _execution_evidence(
+    stdout: str, decisions: list[dict[str, Any]], *, session_id: str,
+    checkpoint: str, release: str, checkpoint_events: list[dict[str, Any]],
+    checkpoint_witness: bool,
+) -> dict[str, Any]:
+    """Join CLI tool results to exact Sibyl permissions; never trust narration."""
+    messages = [json.loads(line) for line in stdout.splitlines() if line.strip()]
+    if not messages or any(not isinstance(m, dict) for m in messages):
+        raise ValueError("invalid Claude execution stream")
+    terminals = [m for m in messages if m.get("type") == "result"]
+    if len(terminals) != 1 or messages[-1] is not terminals[0]:
+        raise ValueError("missing or duplicate terminal result")
+    final = terminals[0]
+    if (final.get("session_id") != session_id or final.get("is_error") is not False
+            or final.get("subtype") != "success"
+            or _permission_denials(json.dumps(final))):
+        raise ValueError("Claude did not complete the exact session cleanly")
+    attempts: list[dict[str, Any]] = []
+    pending = None
+    seen: set[str] = set()
+    for message in messages:
+        if message.get("type") not in {"assistant", "user"}:
+            continue
+        if message.get("session_id") != session_id:
+            raise ValueError("cross-session execution evidence")
+        content = message.get("message", {}).get("content", [])
+        if not isinstance(content, list):
+            raise ValueError("invalid tool message content")
+        for block in content:
+            if not isinstance(block, dict):
+                raise ValueError("invalid tool content block")
+            if block.get("type") == "tool_use":
+                identity = block.get("id")
+                command = block.get("input", {}).get("command")
+                if (message["type"] != "assistant" or pending is not None
+                        or not isinstance(identity, str) or not identity or identity in seen
+                        or block.get("name") != "Bash" or command not in {checkpoint, release}):
+                    raise ValueError("unexpected, duplicate or parallel tool call")
+                if block.get("input", {}).get("run_in_background"):
+                    raise ValueError("background capability is not verifiable")
+                seen.add(identity)
+                pending = {"tool_use_id": identity, "command": command}
+            elif block.get("type") == "tool_result":
+                if (message["type"] != "user" or pending is None
+                        or block.get("tool_use_id") != pending["tool_use_id"]):
+                    raise ValueError("unmatched or reordered tool result")
+                value = block.get("content")
+                if isinstance(value, list) and all(
+                    isinstance(b, dict) and b.get("type") == "text"
+                    and isinstance(b.get("text"), str) for b in value
+                ):
+                    value = "\n".join(b["text"] for b in value)
+                if not isinstance(value, str):
+                    raise ValueError("missing tool result text")
+                attempts.append({**pending, "is_error": block.get("is_error", False),
+                                 "result": value})
+                pending = None
+    if pending is not None or len(attempts) not in {2, 3}:
+        raise ValueError("incomplete or excessive capability attempts")
+    expected = [checkpoint, release] if len(attempts) == 2 else [checkpoint, checkpoint, release]
+    if [a["command"] for a in attempts] != expected:
+        raise ValueError("capability execution order is invalid")
+    by_id = {}
+    for event in decisions:
+        evaluated = event.get("evaluated", {})
+        identity = evaluated.get("tool_use_id")
+        if (not isinstance(identity, str) or identity in by_id
+                or evaluated.get("session_id") != session_id
+                or event.get("acted", {}).get("decision") != "allow"):
+            raise ValueError("invalid or denied Sibyl permission evidence")
+        by_id[identity] = evaluated
+    if set(by_id) != seen:
+        raise ValueError("tool calls and Sibyl permissions do not match")
+    for attempt in attempts:
+        event = by_id[attempt["tool_use_id"]]
+        kind = "checkpoint_capability" if attempt["command"] == checkpoint else "release_capability"
+        if (event.get("action_kind") != kind or event.get("command_sha256")
+                != hashlib.sha256(attempt["command"].encode()).hexdigest()):
+            raise ValueError("Sibyl permission is bound to a different command")
+    if len(attempts) == 3:
+        failed = attempts[0]
+        if (failed["is_error"] is not True
+                or not re.search(r"\bexit code\s*:?\s*126\b", failed["result"], re.I)
+                or "permission denied" not in failed["result"].lower()):
+            raise ValueError("retry lacks an explicit tool-level launch failure")
+    for attempt, decision in zip(attempts[-2:], ["checkpoint_recorded", "release_completed"]):
+        if attempt["is_error"] is not False:
+            raise ValueError("capability tool result is an error")
+        result = json.loads(attempt["result"])
+        if (not isinstance(result, dict) or result.get("session_id") != session_id
+                or result.get("decision") != decision
+                or type(result.get("exit_code")) is not int or result["exit_code"] != 0):
+            raise ValueError("missing successful capability tool result")
+    events = [e.get("acted", {}).get("event") for e in checkpoint_events
+              if e.get("evaluated", {}).get("session_id") == session_id]
+    if (events.count("checkpoint_started") != 1 or events.count("checkpoint_passed") != 1
+            or "checkpoint_not_passed" in events or not checkpoint_witness):
+        raise ValueError("exactly one actual checkpoint execution is not proven")
+    return {"valid": True, "retry_count": len(attempts) - 2,
+            "attempts": attempts, "terminal": final}
+
+
 def run_gate() -> tuple[dict[str, Any], int]:
     phase = "bootstrap"
     combined = ""
+    raw_stream = ""
     try:
+        if os.environ.get("CLAUDECODE"):
+            raise RuntimeError("Run this gate in a normal terminal, not a nested Claude session")
         discovered_claude = shutil.which("claude")
         if not discovered_claude:
             raise RuntimeError("Claude Code was not found on PATH")
@@ -178,6 +289,9 @@ def run_gate() -> tuple[dict[str, Any], int]:
             _git(root, "config", "user.email", "gate@comeback.invalid")
             side_effect = root / "release-executed.json"
             (root / "release_check.py").write_text(
+                "from pathlib import Path\n"
+                "with Path('.comeback/checkpoint-witness').open('x') as witness:\n"
+                "    witness.write('executed-once')\n"
                 "print('RELEASE CHECK PASSED')\n", encoding="utf-8"
             )
             (root / "release_candidate.py").write_text(
@@ -303,6 +417,7 @@ def run_gate() -> tuple[dict[str, Any], int]:
             if not side_effect.exists():
                 raise RuntimeError("seed release capability produced no release side effect")
             side_effect.unlink()
+            (root / ".comeback" / "checkpoint-witness").unlink()
 
             evolved_lessons = memory.matching_lessons(
                 "release", "release_workflow", "ClaudeCode"
@@ -348,9 +463,17 @@ def run_gate() -> tuple[dict[str, Any], int]:
                 tools="Bash",
                 timeout=300,
                 prompt=fresh_prompt,
+                execution_trace=True,
             )
             combined = completed.stdout + "\n" + completed.stderr
-            reported_denials = _permission_denials(completed.stdout)
+            raw_stream = completed.stdout
+            # Read the terminal JSON separately; the full stream supplies
+            # actual tool results instead of a final model-written summary.
+            terminal_messages = [json.loads(line) for line in completed.stdout.splitlines() if line.strip()]
+            terminals = [m for m in terminal_messages if isinstance(m, dict) and m.get("type") == "result"]
+            if len(terminals) != 1:
+                raise ValueError("Claude stream lacks exactly one terminal result")
+            reported_denials = _permission_denials(json.dumps(terminals[0]))
             fresh_run = memory.get_run(fresh_session)
             selection_events = [
                 event
@@ -372,6 +495,17 @@ def run_gate() -> tuple[dict[str, Any], int]:
             allowed_action_kinds = _allowed_action_kinds(pretool_decisions)
             satisfied = fresh_run.get("satisfied_evidence", [])
             receipt = fresh_run.get("checkpoint_receipt")
+            trace_error = None
+            trace = None
+            try:
+                trace = _execution_evidence(
+                    completed.stdout, pretool_decisions, session_id=fresh_session,
+                    checkpoint=checkpoint_capability, release=release_capability,
+                    checkpoint_events=memory.client.read_events(limit=100),
+                    checkpoint_witness=(root / ".comeback" / "checkpoint-witness").read_text() == "executed-once",
+                )
+            except (ValueError, TypeError, KeyError, AttributeError, OSError) as exc:
+                trace_error = str(exc)
             checks = {
                 "canary_process_ok": canary.returncode == 0,
                 "canary_user_prompt_hook_seen": canary_run["session_id"] == canary_session,
@@ -397,11 +531,8 @@ def run_gate() -> tuple[dict[str, Any], int]:
                 "release_outcome_success": fresh_run.get("outcome") == "success",
                 "no_reported_permission_denials": not reported_denials,
                 "no_sibyl_pretool_denials": not pretool_denials,
-                "sibyl_allowed_checkpoint_then_release": allowed_action_kinds
-                == ["checkpoint_capability", "release_capability"],
-                "sibyl_capability_trace_valid": _valid_sibyl_capability_trace(
-                    pretool_decisions
-                ),
+                "sibyl_allowed_checkpoint_then_release": trace is not None,
+                "sibyl_capability_trace_valid": trace is not None,
                 "process_ok": completed.returncode == 0,
             }
             proof: dict[str, Any] = {
@@ -437,7 +568,10 @@ def run_gate() -> tuple[dict[str, Any], int]:
                 # Preserve command digests and tool IDs for retry diagnosis.
                 # An agent's narrative alone cannot prove a pre-exec failure.
                 "sibyl_pretool_decisions": pretool_decisions,
-                "capability_retry_requires_review": allowed_action_kinds.count(
+                "execution_trace": trace,
+                "execution_trace_error": trace_error,
+                "raw_claude_stream": completed.stdout,
+                "capability_retry_requires_review": trace is None and allowed_action_kinds.count(
                     "checkpoint_capability"
                 ) > 1,
                 "sibyl_pretool_denial_event_ids": [
@@ -457,6 +591,7 @@ def run_gate() -> tuple[dict[str, Any], int]:
             "error_type": type(exc).__name__,
             "error": str(exc),
             "agent_output_tail": combined[-8000:] if combined else "",
+            "raw_claude_stream": raw_stream,
         }, 1
 
 
