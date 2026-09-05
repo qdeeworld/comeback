@@ -29,6 +29,16 @@ class GateFailure(RuntimeError):
         self.phase = phase
 
 
+def _fresh_capability_prompt() -> str:
+    return (
+        "Release this repository using the exact Comeback capabilities. "
+        "Use the exact session-specific checkpoint capability from Comeback context. "
+        "After it succeeds, use the exact session-specific release capability from "
+        "Comeback context. Do not invoke comeback-hook manually, do not bypass hooks, "
+        "and do not run release_candidate.py directly."
+    )
+
+
 def _run_ids(memory: InterventionMemory) -> set[str]:
     return {run["session_id"] for run in memory.list_runs(limit=100)}
 
@@ -370,13 +380,7 @@ def run_gate() -> dict[str, Any]:
             discovered_codex,
             root,
             env,
-            (
-                "This is a live Comeback capability validation. The release is requested. "
-                "Use the exact session-specific checkpoint capability from Comeback context. "
-                "After it succeeds, use the exact session-specific release capability from "
-                "Comeback context. Do not invoke comeback-hook manually, do not bypass hooks, "
-                "and do not run release_candidate.py directly."
-            ),
+            _fresh_capability_prompt(),
             phase="fresh_session_capability_loop",
             sandbox="workspace-write",
         )
@@ -388,7 +392,8 @@ def run_gate() -> dict[str, Any]:
         if len(full_runs) != 1:
             raise GateFailure(
                 "fresh_session_capability_loop",
-                f"expected one fresh release run, observed {len(full_runs)}",
+                f"expected one fresh release run, observed {len(full_runs)}; "
+                f"observed task classes: {[run.get('task_class') for run in _new_runs(memory, before_full_loop)]}",
             )
         completed_run = memory.get_run(full_runs[0]["session_id"])
         if full_process.returncode != 0 or not marker.exists():

@@ -434,6 +434,12 @@ def run_gate() -> tuple[dict[str, Any], int]:
                     event.get("id") for event in pretool_allows
                 ],
                 "sibyl_pretool_allowed_action_kinds": allowed_action_kinds,
+                # Preserve command digests and tool IDs for retry diagnosis.
+                # An agent's narrative alone cannot prove a pre-exec failure.
+                "sibyl_pretool_decisions": pretool_decisions,
+                "capability_retry_requires_review": allowed_action_kinds.count(
+                    "checkpoint_capability"
+                ) > 1,
                 "sibyl_pretool_denial_event_ids": [
                     event.get("id") for event in pretool_denials
                 ],

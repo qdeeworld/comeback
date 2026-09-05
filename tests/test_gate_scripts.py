@@ -5,6 +5,9 @@ from pathlib import Path
 import pytest
 
 from comeback.policy import classify_task
+from scripts.run_codex_hook_gate import (
+    _fresh_capability_prompt as _codex_fresh_capability_prompt,
+)
 from scripts.run_claude_unlock_gate import _run_claude as _run_claude_unlock
 from scripts.run_claude_unlock_gate import (
     _fresh_capability_prompt,
@@ -61,6 +64,12 @@ def test_claude_unlock_prompt_is_release_classified_before_first_tool() -> None:
     )
 
     assert classify_task(prompt) == ("release", "release_workflow")
+
+
+def test_codex_capability_prompt_is_release_classified_before_first_tool() -> None:
+    assert classify_task(_codex_fresh_capability_prompt()) == (
+        "release", "release_workflow"
+    )
 
 
 def test_claude_unlock_gate_keeps_prefixed_permission_denials() -> None:

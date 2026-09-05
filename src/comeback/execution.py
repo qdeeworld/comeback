@@ -895,8 +895,16 @@ def _wait_for_runner_ready(
     raise MemoryIntegrityError("release runner did not reach its start barrier")
 
 
+def _start_barrier_temporary(path: Path, nonce: str) -> Path:
+    # Do not repeat the already-long lock name and nonce: that can exceed
+    # Windows MAX_PATH even when the final barrier itself fits. Bind the
+    # bounded staging name to both inputs while retaining O_EXCL ownership.
+    digest = hashlib.sha256((path.name + "\0" + nonce).encode()).hexdigest()[:32]
+    return path.with_name(f".cb-{digest}.tmp")
+
+
 def _open_start_barrier(path: Path, nonce: str) -> None:
-    temporary = path.with_name(f".{path.name}.{nonce}.tmp")
+    temporary = _start_barrier_temporary(path, nonce)
     descriptor = os.open(temporary, _ATOMIC_WRITE_FLAGS, 0o600)
     try:
         try:
