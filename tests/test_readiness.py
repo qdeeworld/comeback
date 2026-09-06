@@ -158,8 +158,21 @@ def test_native_windows_read_retains_access_denial(tmp_path):
 
 @pytest.mark.skipif(os.name != 'nt', reason='requires native Windows read')
 def test_native_windows_read_caps_input_and_closes_handle(tmp_path):
+    import ctypes
+    from ctypes import wintypes
     path = tmp_path / 'ready'
     path.write_bytes(b'x' * 4097)
     with pytest.raises(MemoryIntegrityError, match='exceeds size limit'):
         execution._read_runner_ready(path)
-    path.unlink()  # No leaked native read handle on the rejection path.
+    # FILE_SHARE_DELETE makes unlink insufficient to detect a leaked handle.
+    # A new exclusive reader is incompatible with any still-open read handle.
+    kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+    kernel.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
+        ctypes.c_void_p, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+    kernel.CreateFileW.restype = wintypes.HANDLE
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel.CloseHandle.restype = wintypes.BOOL
+    handle = kernel.CreateFileW(str(path), 0x80000000, 0, None, 3, 0x80, None)
+    assert handle != ctypes.c_void_p(-1).value, ctypes.get_last_error()
+    assert kernel.CloseHandle(handle)
+    path.unlink()
