@@ -874,17 +874,85 @@ def _runner_launch_command(
     ]
 
 
+def _read_runner_ready(path: Path) -> str:
+    if os.name != "nt":
+        return path.read_text(encoding="utf-8")
+    # Python's CRT-backed open can discard GetLastError and expose only EACCES.
+    # Preserve the native code so a sharing violation is not confused with an
+    # ACL denial. Share deletion as well, to coexist with atomic publication.
+    import ctypes
+    from ctypes import wintypes
+
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.CreateFileW.argtypes = [
+        wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p,
+        wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE,
+    ]
+    kernel.CreateFileW.restype = wintypes.HANDLE
+    kernel.ReadFile.argtypes = [
+        wintypes.HANDLE, ctypes.c_void_p, wintypes.DWORD,
+        ctypes.POINTER(wintypes.DWORD), ctypes.c_void_p,
+    ]
+    kernel.ReadFile.restype = wintypes.BOOL
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel.CloseHandle.restype = wintypes.BOOL
+    handle = kernel.CreateFileW(str(path), 0x80000000, 1 | 2 | 4, None, 3, 0x80, None)
+    if handle == ctypes.c_void_p(-1).value:
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        buffer = ctypes.create_string_buffer(4097)
+        count = wintypes.DWORD()
+        if not kernel.ReadFile(handle, buffer, len(buffer), ctypes.byref(count), None):
+            raise ctypes.WinError(ctypes.get_last_error())
+        if count.value > 4096:
+            raise MemoryIntegrityError("release runner readiness record exceeds size limit")
+        return buffer.raw[:count.value].decode("utf-8")
+    finally:
+        kernel.CloseHandle(handle)
+
+
 def _wait_for_runner_ready(
     process: subprocess.Popen[str], ready_path: Path, *, timeout: float = 10
 ) -> None:
     deadline = time.monotonic() + timeout
+    last_io_error: str | None = None
     while time.monotonic() < deadline:
-        if ready_path.is_file():
+        try:
+            payload = _read_runner_ready(ready_path)
+        except FileNotFoundError:
+            pass  # The runner has not published its complete record yet.
+        except OSError as exc:
+            # Do not include paths or file contents in operator diagnostics.
+            detail = (
+                f"{type(exc).__name__}, errno={exc.errno}, "
+                f"winerror={getattr(exc, 'winerror', None)}"
+            )
+            if getattr(exc, "winerror", None) not in {32, 33}:
+                raise MemoryIntegrityError(
+                    f"release runner readiness read failed ({detail})"
+                ) from exc
+            # Windows sharing/lock violations can outlive atomic publication.
+            # Retry only the read, never the command, within the same deadline.
+            # Malformed data, ACL denials and wrong identities still fail closed.
+            last_io_error = detail
+        except UnicodeError as exc:
+            raise MemoryIntegrityError(
+                "release runner readiness record is invalid (UTF-8 decoding failed)"
+            ) from exc
+        else:
             try:
-                ready = json.loads(ready_path.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError) as exc:
-                raise MemoryIntegrityError("release runner readiness record is invalid") from exc
-            if ready != {"process_id": process.pid}:
+                ready = json.loads(payload)
+            except json.JSONDecodeError as exc:
+                raise MemoryIntegrityError(
+                    "release runner readiness record is invalid "
+                    f"(JSONDecodeError, line={exc.lineno}, column={exc.colno})"
+                ) from exc
+            if (
+                not isinstance(ready, dict)
+                or set(ready) != {"process_id"}
+                or type(ready["process_id"]) is not int
+                or ready["process_id"] != process.pid
+            ):
                 raise MemoryIntegrityError("release runner readiness identity is invalid")
             return
         if process.poll() is not None:
@@ -892,7 +960,8 @@ def _wait_for_runner_ready(
                 f"release runner exited {process.returncode} before its start barrier"
             )
         time.sleep(0.02)
-    raise MemoryIntegrityError("release runner did not reach its start barrier")
+    detail = f"; last readiness read: {last_io_error}" if last_io_error else ""
+    raise MemoryIntegrityError(f"release runner did not reach its start barrier{detail}")
 
 
 def _start_barrier_temporary(path: Path, nonce: str) -> Path:
