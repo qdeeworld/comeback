@@ -196,6 +196,14 @@ Replace the interpreter path, release target, and destination branch with the re
 
 New interventions default to `--agent-scope all_supported`, which makes a Codex correction eligible for Claude Code recall and vice versa. Treat that as a cross-agent claim only after the authenticated Claude gates pass on the installed version; the current candidate's authenticated end-to-end evidence is Codex. Use `--agent-scope same_agent` when appropriate. The scope, checkpoint command, release command, timeouts, repository identity, and authorized closer are all signed.
 
+## Separate deployment and migration workflows
+
+Comeback supports two signed workflow scopes: `release_workflow` for deployment and `migration_workflow` for a developer-defined database migration. Existing deployment records remain valid. Start a fresh agent session with an explicit request such as “Apply the database migration.” The source session's scope appears in the prepared intervention's signed `area` and deterministic lesson ID; review both before signing. Use the existing `--checkpoint-argv-json` and `--release-argv-json` options for your verifier and migration command. The CLI execution verb remains `release` for both scopes.
+
+Migration and deployment lessons, receipts, approvals and outcome histories are separate. Success in one does not relax the other. Commands matching signed migration actions select that scope even if the prompt omitted migration wording. A session cannot switch protected workflows to reuse evidence: start a fresh session. Registering the identical protected argv in both scopes is refused; ambiguous raw command matches are denied. Execution remains serialized per repository for safety.
+
+This is two bounded workflows, not arbitrary skill enforcement or a migration engine. Migration commands must enforce their own transactional preconditions: a source-code checkpoint does not bind a live database snapshot, and database changes do not automatically invalidate its receipt. Existing shell/credential isolation limits still apply. Base continues to anchor the repository owner and the initial intervention, not each later workflow's full history. The migration evidence is currently deterministic SQLite/subprocess testing, not independent user or authenticated cross-agent completion.
+
 ## Fresh supervised session
 
 End the original agent process and start a genuinely fresh one with only the related release request. Comeback injects commands tied to that exact session:

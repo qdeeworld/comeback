@@ -7,6 +7,14 @@ from typing import Any
 
 
 MODES = ("AUTONOMOUS", "CHECKPOINTED", "HUMAN_REQUIRED")
+WORKFLOW_AREAS = ("release_workflow", "migration_workflow")
+
+_MIGRATION_PROMPT = re.compile(
+    r"\A\s*(?:please\s+)?(?:"
+    r"(?:apply|run|execute)\s+(?:(?:the|this|a)\s+)?(?:database\s+|db\s+)?migration"
+    r"|migrate\s+(?:(?:the|this|a)\s+)?(?:database|db|schema)"
+    r")(?:\s+now)?[.!]?\s*\Z", re.I
+)
 
 _RELEASE_PROMPT_PATTERNS = (
     re.compile(r"\bgit\s+push\b", re.IGNORECASE),
@@ -30,6 +38,8 @@ _CONTROL_PREFIXES = {"if", "then", "else", "elif", "while", "until", "do"}
 
 
 def classify_task(prompt: str) -> tuple[str, str]:
+    if _MIGRATION_PROMPT.search(prompt):
+        return "release", "migration_workflow"
     if any(pattern.search(prompt) for pattern in _RELEASE_PROMPT_PATTERNS):
         return "release", "release_workflow"
     return "low_risk", "general"

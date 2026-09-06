@@ -11,6 +11,7 @@ from .identity import repository_configuration
 from .launcher import launcher_argv
 from .memory import InterventionMemory, MemoryIntegrityError
 from .policy import (
+    WORKFLOW_AREAS,
     classify_task,
     comeback_capability_action,
     command_from_event,
@@ -94,6 +95,7 @@ def _context(run: dict[str, Any], event: dict[str, Any]) -> str:
     )
     return (
         f"Comeback supervision: {run['mode']}. "
+        f"Workflow: {run['area']}. "
         f"Recalled intervention lessons: {lessons}. Required evidence: {requirements}. "
         f"Checkpoint capability: {checkpoint}. Release capability: {release}. "
         "Do not claim completion while this run remains open."
@@ -189,22 +191,22 @@ def _handle_event(
     )
     comeback_action = comeback_capability_action(event)
     configured_raw_action = False
+    configured_areas: set[str] = set()
     preliminary_run: dict[str, Any] | None = None
     if event_name == "PreToolUse":
         try:
             preliminary_run = memory.get_run(session_id)
         except MemoryIntegrityError:
             preliminary_run = None
-        configured_raw_action = any(
-            invokes_configured_argv(
+        configured_areas = {
+            area for area, release_argv in memory.configured_workflow_actions(_agent_family(event))
+            if invokes_configured_argv(
                 release_command,
                 release_argv,
                 working_directory=root,
             )
-            for release_argv in memory.configured_release_argvs(
-                _agent_family(event)
-            )
-        )
+        }
+        configured_raw_action = bool(configured_areas)
     if event_name == "PreToolUse" and (
         is_release_action(event)
         or exact_checkpoint
@@ -250,11 +252,22 @@ def _handle_event(
                 decision="deny",
                 reason=f"Comeback fail-closed: {exc}",
             )
+        if len(configured_areas) > 1:
+            return _pretool_result(memory, event, action_kind=action_kind, decision="deny",
+                reason="Comeback refuses an action matching multiple signed workflows.")
+        selected_area = (
+            next(iter(configured_areas)) if configured_areas
+            else run["area"] if exact_checkpoint or exact_release or comeback_action is not None
+            else "release_workflow"
+        )
+        if run["task_class"] == "release" and run["area"] != selected_area:
+            return _pretool_result(memory, event, action_kind=action_kind, decision="deny",
+                reason="Comeback workflow mismatch: start a fresh session for the other workflow.")
         if run["task_class"] != "release":
             run = memory.start_run(
                 session_id=session_id,
                 task_class="release",
-                area="release_workflow",
+                area=selected_area if selected_area in WORKFLOW_AREAS else "release_workflow",
                 agent_family=_agent_family(event),
                 model=str(event.get("model", "unknown")),
                 process_id=os.getpid(),
