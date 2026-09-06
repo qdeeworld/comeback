@@ -2,6 +2,7 @@
 from copy import deepcopy
 from datetime import datetime, timezone
 import sqlite3
+import shlex
 import sys
 
 import pytest
@@ -107,3 +108,17 @@ def test_test_only_session_can_stop_with_migration_lesson_present(tmp_path, prom
         session='tests-only', prompt=prompt))
     assert child(tmp_path, 'run', session='tests-only')['lesson_ids'] == []
     assert child(tmp_path, 'event', event=event(tmp_path, 'Stop', session='tests-only')) is None
+
+
+def test_signed_action_selects_migration_without_prompt_keyword(tmp_path):
+    fixture(tmp_path)
+    child(tmp_path, 'event', event=event(tmp_path, 'UserPromptSubmit',
+        session='action-selected', prompt='Update the profile feature.'))
+    assert child(tmp_path, 'run', session='action-selected')['lesson_ids'] == []
+    result = child(tmp_path, 'event', event=event(tmp_path, 'PreToolUse',
+        session='action-selected', tool_name='Bash', tool_use_id='actual-migration',
+        tool_input={'command': shlex.join([sys.executable, '-c', MIGRATE])}))
+    assert result['hookSpecificOutput']['permissionDecision'] == 'deny'
+    run = child(tmp_path, 'run', session='action-selected')
+    assert run['area'] == 'migration_workflow'
+    assert run['lesson_ids'] == ['release-migration_workflow-codex']
