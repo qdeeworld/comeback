@@ -10,10 +10,10 @@ MODES = ("AUTONOMOUS", "CHECKPOINTED", "HUMAN_REQUIRED")
 WORKFLOW_AREAS = ("release_workflow", "migration_workflow")
 
 _MIGRATION_PROMPT = re.compile(
-    r"\b(?:apply|run|execute)\s+(?:(?:the|this|a)\s+)?(?:database\s+|db\s+)?migration\b"
-    r"(?=\s*(?:[.!?]|$)|\s+(?:to|on|now)\b)"
-    r"|\bmigrate\s+(?:(?:the|this|a)\s+)?(?:database|db|schema)\b"
-    r"(?=\s*(?:[.!?]|$)|\s+(?:to|on|now)\b)", re.I
+    r"\A\s*(?:please\s+)?(?:"
+    r"(?:apply|run|execute)\s+(?:(?:the|this|a)\s+)?(?:database\s+|db\s+)?migration"
+    r"|migrate\s+(?:(?:the|this|a)\s+)?(?:database|db|schema)"
+    r")(?:\s+now)?[.!]?\s*\Z", re.I
 )
 
 _RELEASE_PROMPT_PATTERNS = (

@@ -89,14 +89,21 @@ def test_prompt_routes_scopes_without_relabeling_legacy_deployment():
     'Run migration tests', 'Run database migration checks',
     'Execute migration validation', 'Run migration unit tests',
     'Run migration-test suite',
+    'Explain how to run the database migration.',
+    'Do not run the database migration.',
+    'Never apply the database migration.',
+    'Run the database migration? Just explain, do not execute.',
+    'Apply the database migration. Actually, do not run it.',
 ])
 def test_migration_test_requests_are_not_protected_actions(prompt):
     assert classify_task(prompt) == ('low_risk', 'general')
 
 
-def test_test_only_session_can_stop_with_migration_lesson_present(tmp_path):
+@pytest.mark.parametrize('prompt', ['Run migration tests',
+    'Explain how to run the database migration.', 'Do not run the database migration.'])
+def test_test_only_session_can_stop_with_migration_lesson_present(tmp_path, prompt):
     fixture(tmp_path)
     child(tmp_path, 'event', event=event(tmp_path, 'UserPromptSubmit',
-        session='tests-only', prompt='Run migration tests'))
+        session='tests-only', prompt=prompt))
     assert child(tmp_path, 'run', session='tests-only')['lesson_ids'] == []
     assert child(tmp_path, 'event', event=event(tmp_path, 'Stop', session='tests-only')) is None
