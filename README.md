@@ -9,7 +9,7 @@ This repository is a bounded Sibyl hackathon validation spike, not a production 
 1. A developer records a signed intervention after an agent skips a required release check.
 2. Sibyl stores the intervention, command specifications, provenance, outcome counts, and current supervision mode.
 3. The process ends.
-4. A fresh supported-agent session receives only a related release request. Codex has current authenticated evidence; claim Claude Code only after the separate authenticated gates pass on the installed Claude version.
+4. A fresh supported-agent session receives only a related release request. Authenticated Codex and Windows Claude Code release checks have passed; see the [versioned validation record](evidence/agent-validation-2026-09-06.md) for the exact environments and fixture limits.
 5. Comeback recalls the intervention and selects `HUMAN_REQUIRED`, `CHECKPOINTED`, or `AUTONOMOUS`.
 6. Its hook denies recognized raw release commands; the one exact release argument vector recorded in the intervention can run through a one-shot Comeback capability after its requirements pass.
 7. The result is written back to Sibyl, changing the next fresh session's supervision mode.
@@ -19,7 +19,7 @@ Unrelated low-risk work remains `AUTONOMOUS`.
 ## Prerequisites
 
 - Git and a Git repository with at least one commit.
-- An installed and authenticated coding agent. Codex CLI `0.152.1` and `0.153.1` are exercised by authenticated gates. The externally reported `0.150.0-alpha.12.2` Windows build is not supported; regardless of version, `comeback doctor` must prove real lifecycle activation before use.
+- An installed and authenticated coding agent. Authenticated checks cover Codex CLI `0.152.1`, `0.153.1`, and `0.153.3`, plus Windows Claude Code `2.1.263`. The externally reported `0.150.0-alpha.12.2` Windows Codex build is not supported. Validate activation in your own installation using the agent-specific instructions below; Claude doctor alone does not prove real lifecycle dispatch.
 - [`uv`](https://docs.astral.sh/uv/getting-started/installation/). It can install the required Python automatically.
 - Git Bash only when using Claude Code on Windows.
 
@@ -202,7 +202,7 @@ Comeback supports two signed workflow scopes: `release_workflow` for deployment 
 
 Migration and deployment lessons, receipts, approvals and outcome histories are separate. Success in one does not relax the other. Commands matching signed migration actions select that scope even if the prompt omitted migration wording. A session cannot switch protected workflows to reuse evidence: start a fresh session. Registering the identical protected argv in both scopes is refused; ambiguous raw command matches are denied. Execution remains serialized per repository for safety.
 
-This is two bounded workflows, not arbitrary skill enforcement or a migration engine. Migration commands must enforce their own transactional preconditions: a source-code checkpoint does not bind a live database snapshot, and database changes do not automatically invalidate its receipt. Existing shell/credential isolation limits still apply. Base continues to anchor the repository owner and the initial intervention, not each later workflow's full history. The migration evidence is currently deterministic SQLite/subprocess testing, not independent user or authenticated cross-agent completion.
+This is two bounded workflows, not arbitrary skill enforcement or a migration engine. Migration commands must enforce their own transactional preconditions: a source-code checkpoint does not bind a live database snapshot, and database changes do not automatically invalidate its receipt. Existing shell/credential isolation limits still apply. Base continues to anchor the repository owner and the initial intervention, not each later workflow's full history. Migration evidence includes deterministic SQLite/subprocess testing and a maintainer-operated real Codex migration/isolation run at an earlier revision; it is not independent user or authenticated cross-agent migration completion. See the [versioned validation record](evidence/agent-validation-2026-09-06.md).
 
 ## Fresh supervised session
 
@@ -213,7 +213,7 @@ ABSOLUTE_COMEBACK_PATH --db ABSOLUTE_MEMORY_DB checkpoint --session-id FRESH_SES
 ABSOLUTE_COMEBACK_PATH --db ABSOLUTE_MEMORY_DB release --session-id FRESH_SESSION_ID
 ```
 
-The actual injected commands contain the absolute path to the installed `comeback` or `comeback.exe`. Copy them exactly. Relative substitutes such as `comeback`, `./comeback`, extra flags, another session ID, or appended shell input are rejected by the hook.
+The actual injected commands contain the absolute installed executable path; on Windows they use the installation's adjacent `python.exe -I -m comeback.cli`. Copy the injected command exactly. Relative substitutes such as `comeback`, `./comeback`, extra flags, another session ID, or appended shell input are rejected by the hook.
 
 The checkpoint capability resolves the signed executable once against the repository's captured PATH, fingerprints that absolute file, and executes that same absolute executable with the signed argument array and `shell=False` inside a managed process-tree boundary. With no operator override it uses the signed timeout; `--timeout` may only shorten that limit. Starting any recheck durably revokes the prior checkpoint receipt and human approval under a unique attempt nonce before the command can run. A failure, timeout, interruption, or overlapping/stale completion therefore cannot leave the older evidence authorized. A timeout or surviving background process is stopped and cannot mint a receipt. Windows `.bat` and `.cmd` launchers are refused because Windows may pass them through a command shell even with `shell=False`; use a native executable or an explicit Python/Node executable instead. A successful foreground exit records a receipt containing the repository fingerprint; model-reported output is never evidence. In `HUMAN_REQUIRED`, the developer then approves from a separate native terminal:
 
