@@ -18,7 +18,7 @@ from sibyl_memory_client.exceptions import NotFoundError
 
 from .base_trust import BaseTrustError, client_for_repository
 from .identity import BaseTrustConfig, tenant_id
-from .policy import MODES, mode_for_outcomes, requirements_for_mode
+from .policy import MODES, WORKFLOW_AREAS, mode_for_outcomes, requirements_for_mode
 from .signing import (
     action_spec_digest,
     approval_message,
@@ -230,8 +230,8 @@ def _signed_intervention_fields(value: Any) -> dict[str, Any]:
     ):
         if not isinstance(fields.get(name), str) or not fields[name]:
             raise MemoryIntegrityError(f"signed intervention {name} is invalid")
-    if fields["task_class"] != "release" or fields["area"] != "release_workflow":
-        raise MemoryIntegrityError("only the release/release_workflow intervention is supported")
+    if fields["task_class"] != "release" or fields["area"] not in WORKFLOW_AREAS:
+        raise MemoryIntegrityError("only deployment and migration workflow interventions are supported")
     if fields["severity"] != "release_blocker":
         raise MemoryIntegrityError("only release_blocker interventions are supported")
     if fields["agent_family"] not in _SUPPORTED_AGENTS:
@@ -240,7 +240,7 @@ def _signed_intervention_fields(value: Any) -> dict[str, Any]:
     if fields["agent_scope"] not in ("same_agent", "all_supported"):
         raise MemoryIntegrityError("intervention agent scope is invalid")
     expected_lesson_id = (
-        f"release-release_workflow-{fields['agent_family'].lower()}"
+        f"release-{fields['area']}-{fields['agent_family'].lower()}"
     )
     if fields["lesson_id"] != expected_lesson_id:
         raise MemoryIntegrityError("intervention lesson ID is not the deterministic supported ID")
@@ -733,13 +733,17 @@ class InterventionMemory:
 
     def _load_all_lessons(self) -> list[dict[str, Any]]:
         lessons: list[dict[str, Any]] = []
-        for source_agent in _SUPPORTED_AGENTS:
-            lesson_id = f"release-release_workflow-{source_agent.lower()}"
+        lesson_ids = [f"release-{area}-{agent.lower()}"
+                      for area in WORKFLOW_AREAS
+                      for agent in _SUPPORTED_AGENTS]
+        for lesson_id in lesson_ids:
             try:
                 entity = self.client.get_entity(self.LESSON_CATEGORY, lesson_id)
             except NotFoundError:
                 continue
             lesson = validate_lesson(entity.get("body"))
+            if lesson["lesson_id"] != lesson_id:
+                raise MemoryIntegrityError("lesson is stored under a different workflow identity")
             if lesson["repo_id"] == self.repo_id:
                 lessons.append(lesson)
         return sorted(lessons, key=lambda lesson: lesson["lesson_id"])
@@ -998,8 +1002,12 @@ class InterventionMemory:
                 raise MemoryIntegrityError(
                     "authorized closer is already anchored for this repository"
                 )
+            if (existing["area"] != normalized_signed_fields["area"]
+                    and existing["release_spec"]["argv"] == normalized_signed_fields["release_spec"]["argv"]):
+                raise MemoryIntegrityError("the same protected command cannot belong to different workflows")
             scopes_overlap = (
                 existing["lesson_id"] != lesson_id
+                and existing["area"] == normalized_signed_fields["area"]
                 and (
                     existing["agent_scope"] == "all_supported"
                 or normalized_signed_fields["agent_scope"] == "all_supported"
@@ -1236,6 +1244,13 @@ class InterventionMemory:
             if scope == "all_supported" or lesson["agent_family"].lower() == agent_family.lower():
                 arguments.append(list(lesson["release_spec"]["argv"]))
         return arguments
+
+    def configured_workflow_actions(self, agent_family: str) -> list[tuple[str, list[str]]]:
+        """Signed candidates only; the selected run still verifies Base trust."""
+        return [(lesson["area"], list(lesson["release_spec"]["argv"]))
+                for lesson in self._load_all_lessons()
+                if lesson.get("agent_scope") == "all_supported"
+                or lesson["agent_family"].lower() == agent_family.lower()]
 
     @_serialized_mutation
     def record_pretool_decision(

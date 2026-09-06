@@ -1,6 +1,6 @@
 """Bounded SQLite experiment, not a migration engine or real-agent evidence.
 
-Uses today's release-class signed capability without extending the schema.
+Uses independent migration scope with the release-class signed capability.
 Database contents live outside the repository fingerprint: stale DB state is
 explicitly tested as a limitation, not claimed as protected.
 """
@@ -42,6 +42,7 @@ sys.path.insert(0, data['tests'])
 from test_execution import _supervised_memory
 root = Path.cwd()
 memory, owner = _supervised_memory(root,
+    workflow_area='migration_workflow',
     checkpoint_argv=[sys.executable, '-c', data['check']],
     release_argv=[sys.executable, '-c', data['migrate']])
 with sqlite3.connect(root / '.comeback/application.db') as db:
@@ -148,18 +149,19 @@ def test_unrelated_action_and_memory_ablation(tmp_path):
     assert indexes(tmp_path) == []  # ablation never executes the unapproved action
 
 
-def test_current_migration_obligation_also_gates_unrelated_deployment(tmp_path):
-    """Characterize the missing independent workflow scope; not a desired API."""
+def test_migration_obligation_does_not_gate_unrelated_deployment(tmp_path):
     fixture(tmp_path)
     child(tmp_path, 'event', event=event(tmp_path, 'UserPromptSubmit',
         session='deployment', prompt='Deploy this website.'))
     decision = child(tmp_path, 'event', event=event(tmp_path, 'PreToolUse',
         session='deployment', tool_name='Bash', tool_use_id='push',
         tool_input={'command': 'git push origin main'}))
-    assert decision['hookSpecificOutput']['permissionDecision'] == 'deny'
+    assert decision['hookSpecificOutput'].get('permissionDecision') != 'deny'
+    with InterventionMemory(tmp_path / '.comeback/memory.db', 'repo-a') as memory:
+        assert memory.pretool_decisions('deployment')[0]['acted']['decision'] == 'allow'
     run = child(tmp_path, 'run', session='deployment')
-    assert run['lesson_ids'] == ['release-release_workflow-codex']
-    assert run['mode'] == 'HUMAN_REQUIRED'
+    assert run['lesson_ids'] == []
+    assert run['mode'] == 'AUTONOMOUS'
 
 
 def test_database_changes_do_not_invalidate_current_checkpoint_receipt(tmp_path):

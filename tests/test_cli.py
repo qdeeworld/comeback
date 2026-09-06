@@ -52,14 +52,15 @@ def _commit_repository_anchor(repo: Path, message: str = "repository anchor") ->
     )
 
 
-def test_prepare_sign_and_record_intervention(tmp_path: Path):
+@pytest.mark.parametrize("workflow_area", ["release_workflow", "migration_workflow"])
+def test_prepare_sign_and_record_intervention(tmp_path: Path, workflow_area):
     owner = Account.create()
     _, repo_id = repository_identity(tmp_path)
     memory = InterventionMemory(tmp_path / ".comeback" / "memory.db", repo_id)
     memory.start_run(
         session_id="corrected-session",
         task_class="release",
-        area="release_workflow",
+        area=workflow_area,
         agent_family="Codex",
         model="test",
     )
@@ -101,13 +102,16 @@ def test_prepare_sign_and_record_intervention(tmp_path: Path):
     fresh = memory.start_run(
         session_id="fresh-session",
         task_class="release",
-        area="release_workflow",
+        area=workflow_area,
         agent_family="Codex",
         model="test",
     )
     assert lesson["current_mode"] == "HUMAN_REQUIRED"
     assert lesson["agent_scope"] == "all_supported"
     assert fresh["mode"] == "HUMAN_REQUIRED"
+    assert lesson['area'] == workflow_area
+    assert lesson['lesson_id'] == f'release-{workflow_area}-codex'
+    memory.close()
 
 
 def test_prepare_uses_exact_sibyl_run(tmp_path: Path):

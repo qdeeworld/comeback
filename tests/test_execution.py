@@ -46,6 +46,7 @@ def _supervised_memory(
     checkpoint_timeout: int = 60,
     require_clean_git: bool = True,
     release_argv: list[str] | None = None,
+    workflow_area: str = "release_workflow",
 ) -> tuple[InterventionMemory, object]:
     subprocess.run(["git", "init", "-q", str(root)], check=True)
     subprocess.run(["git", "-C", str(root), "config", "user.email", "test@example.com"], check=True)
@@ -66,10 +67,10 @@ def _supervised_memory(
         "from pathlib import Path; Path('released.txt').write_text('ok')",
     ]
     fields = {
-        "lesson_id": "release-release_workflow-codex",
+        "lesson_id": f"release-{workflow_area}-codex",
         "repo_id": "repo-a",
         "task_class": "release",
-        "area": "release_workflow",
+        "area": workflow_area,
         "agent_family": "Codex",
         "agent_scope": "all_supported",
         "severity": "release_blocker",
@@ -91,7 +92,7 @@ def _supervised_memory(
     memory.start_run(
         session_id="source",
         task_class="release",
-        area="release_workflow",
+        area=workflow_area,
         agent_family="Codex",
         model="test-source",
     )
@@ -108,7 +109,7 @@ def _supervised_memory(
     memory.start_run(
         session_id="fresh",
         task_class="release",
-        area="release_workflow",
+        area=workflow_area,
         agent_family="Codex",
         model="test",
     )
