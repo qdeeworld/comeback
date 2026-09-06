@@ -878,13 +878,44 @@ def _wait_for_runner_ready(
     process: subprocess.Popen[str], ready_path: Path, *, timeout: float = 10
 ) -> None:
     deadline = time.monotonic() + timeout
+    last_io_error: str | None = None
     while time.monotonic() < deadline:
-        if ready_path.is_file():
+        try:
+            payload = ready_path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            pass  # The runner has not published its complete record yet.
+        except OSError as exc:
+            # Do not include paths or file contents in operator diagnostics.
+            detail = (
+                f"{type(exc).__name__}, errno={exc.errno}, "
+                f"winerror={getattr(exc, 'winerror', None)}"
+            )
+            if getattr(exc, "winerror", None) not in {32, 33}:
+                raise MemoryIntegrityError(
+                    f"release runner readiness read failed ({detail})"
+                ) from exc
+            # Windows sharing/lock violations can outlive atomic publication.
+            # Retry only the read, never the command, within the same deadline.
+            # Malformed data, ACL denials and wrong identities still fail closed.
+            last_io_error = detail
+        except UnicodeError as exc:
+            raise MemoryIntegrityError(
+                "release runner readiness record is invalid (UTF-8 decoding failed)"
+            ) from exc
+        else:
             try:
-                ready = json.loads(ready_path.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError) as exc:
-                raise MemoryIntegrityError("release runner readiness record is invalid") from exc
-            if ready != {"process_id": process.pid}:
+                ready = json.loads(payload)
+            except json.JSONDecodeError as exc:
+                raise MemoryIntegrityError(
+                    "release runner readiness record is invalid "
+                    f"(JSONDecodeError, line={exc.lineno}, column={exc.colno})"
+                ) from exc
+            if (
+                not isinstance(ready, dict)
+                or set(ready) != {"process_id"}
+                or type(ready["process_id"]) is not int
+                or ready["process_id"] != process.pid
+            ):
                 raise MemoryIntegrityError("release runner readiness identity is invalid")
             return
         if process.poll() is not None:
@@ -892,7 +923,8 @@ def _wait_for_runner_ready(
                 f"release runner exited {process.returncode} before its start barrier"
             )
         time.sleep(0.02)
-    raise MemoryIntegrityError("release runner did not reach its start barrier")
+    detail = f"; last readiness read: {last_io_error}" if last_io_error else ""
+    raise MemoryIntegrityError(f"release runner did not reach its start barrier{detail}")
 
 
 def _start_barrier_temporary(path: Path, nonce: str) -> Path:
