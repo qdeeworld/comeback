@@ -83,3 +83,20 @@ def test_prompt_routes_scopes_without_relabeling_legacy_deployment():
     assert classify_task('Apply the database migration.') == ('release', 'migration_workflow')
     assert classify_task('Deploy this website.') == ('release', 'release_workflow')
     assert classify_task('Read the README.') == ('low_risk', 'general')
+
+
+@pytest.mark.parametrize('prompt', [
+    'Run migration tests', 'Run database migration checks',
+    'Execute migration validation', 'Run migration unit tests',
+    'Run migration-test suite',
+])
+def test_migration_test_requests_are_not_protected_actions(prompt):
+    assert classify_task(prompt) == ('low_risk', 'general')
+
+
+def test_test_only_session_can_stop_with_migration_lesson_present(tmp_path):
+    fixture(tmp_path)
+    child(tmp_path, 'event', event=event(tmp_path, 'UserPromptSubmit',
+        session='tests-only', prompt='Run migration tests'))
+    assert child(tmp_path, 'run', session='tests-only')['lesson_ids'] == []
+    assert child(tmp_path, 'event', event=event(tmp_path, 'Stop', session='tests-only')) is None
