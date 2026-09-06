@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from comeback.execution import _wait_for_runner_ready, _run_contained_command
+from comeback import execution
 from comeback.memory import MemoryIntegrityError
 
 
@@ -25,7 +26,7 @@ def test_transient_windows_read_lock_retries_only_read(monkeypatch, tmp_path, wi
             error.winerror = winerror
             raise error
         return '{"process_id":123}'
-    monkeypatch.setattr(Path, 'read_text', read)
+    monkeypatch.setattr(execution, '_read_runner_ready', read)
     _wait_for_runner_ready(process(), tmp_path / 'ready')
     assert len(calls) == 2
 
@@ -39,7 +40,7 @@ def test_nontransient_read_error_is_not_retried(monkeypatch, tmp_path, winerror)
         if winerror is not None:
             error.winerror = winerror
         raise error
-    monkeypatch.setattr(Path, 'read_text', read)
+    monkeypatch.setattr(execution, '_read_runner_ready', read)
     with pytest.raises(MemoryIntegrityError, match='read failed') as caught:
         _wait_for_runner_ready(process(), tmp_path / 'ready')
     assert len(calls) == 1
@@ -53,7 +54,7 @@ def test_malformed_json_never_retries(monkeypatch, tmp_path, payload):
     def read(*args, **kwargs):
         calls.append(1)
         return payload
-    monkeypatch.setattr(Path, 'read_text', read)
+    monkeypatch.setattr(execution, '_read_runner_ready', read)
     with pytest.raises(MemoryIntegrityError, match='JSONDecodeError, line=') as caught:
         _wait_for_runner_ready(process(), tmp_path / 'ready')
     assert len(calls) == 1
@@ -84,7 +85,7 @@ def test_read_lock_has_bounded_deadline(monkeypatch, tmp_path):
         error = PermissionError(13, 'locked')
         error.winerror = 32
         raise error
-    monkeypatch.setattr(Path, 'read_text', read)
+    monkeypatch.setattr(execution, '_read_runner_ready', read)
     with pytest.raises(MemoryIntegrityError, match='last readiness read:.*winerror=32'):
         _wait_for_runner_ready(process(), tmp_path / 'ready', timeout=1)
 
@@ -94,7 +95,7 @@ def test_runner_exit_during_read_lock_is_terminal(monkeypatch, tmp_path):
         error = PermissionError(13, 'locked')
         error.winerror = 32
         raise error
-    monkeypatch.setattr(Path, 'read_text', read)
+    monkeypatch.setattr(execution, '_read_runner_ready', read)
     exited = SimpleNamespace(pid=123, returncode=126, poll=lambda: 126)
     with pytest.raises(MemoryIntegrityError, match='runner exited 126'):
         _wait_for_runner_ready(exited, tmp_path / 'ready')
@@ -127,7 +128,7 @@ def test_actual_windows_exclusive_handle_read_recovers(tmp_path):
     assert handle != ctypes.c_void_p(-1).value, ctypes.get_last_error()
     try:
         with pytest.raises(OSError) as caught:
-            path.read_text(encoding='utf-8')
+            execution._read_runner_ready(path)
         assert caught.value.winerror == 32
     except BaseException:
         kernel.CloseHandle(handle)
@@ -146,3 +147,19 @@ def test_actual_windows_exclusive_handle_read_recovers(tmp_path):
     finally:
         worker.join(timeout=2)
     assert closed.is_set()
+
+
+@pytest.mark.skipif(os.name != 'nt', reason='requires native Windows read')
+def test_native_windows_read_retains_access_denial(tmp_path):
+    # Opening a directory as a normal data file must not be treated as a lock.
+    with pytest.raises(MemoryIntegrityError, match='read failed.*winerror=5'):
+        _wait_for_runner_ready(process(), tmp_path)
+
+
+@pytest.mark.skipif(os.name != 'nt', reason='requires native Windows read')
+def test_native_windows_read_caps_input_and_closes_handle(tmp_path):
+    path = tmp_path / 'ready'
+    path.write_bytes(b'x' * 4097)
+    with pytest.raises(MemoryIntegrityError, match='exceeds size limit'):
+        execution._read_runner_ready(path)
+    path.unlink()  # No leaked native read handle on the rejection path.
