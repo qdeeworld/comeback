@@ -53,7 +53,7 @@ If an earlier development install already failed, rerunning it can leave missing
 
 ### Windows application-control compatibility
 
-Windows hooks and signed capability commands use the installation's adjacent `python.exe -I -m comeback.hook` / `comeback.cli`, not the per-install console-script `.exe` stubs. `-I` isolates imports from repository files and Python environment variables. Re-run `init` and review/retrust the changed hooks after upgrading; existing hook files are not silently updated.
+Windows hooks and signed capability commands use the same installation environment's `python.exe -I -m comeback.hook` / `comeback.cli`, not the per-install console-script `.exe` stubs. The interpreter may be alongside the launcher in a virtual environment or one directory above `Scripts` in a base Python installation. `-I` isolates imports from repository files and Python environment variables. Re-run `init` and review/retrust the changed hooks after upgrading; existing hook files are not silently updated.
 
 Initialization and the authenticated Claude gates first probe the environment interpreter without starting an agent. A blocked or broken interpreter stops the workflow. This does **not** certify Smart App Control compatibility: Windows may also block Python or dependencies. Do not disable Windows security or keep retrying. Consult Code Integrity logs and use an administrator-approved Python distribution/environment. A signed interpreter is a candidate installation route, not a guarantee that all dependencies are accepted.
 
@@ -213,7 +213,7 @@ ABSOLUTE_COMEBACK_PATH --db ABSOLUTE_MEMORY_DB checkpoint --session-id FRESH_SES
 ABSOLUTE_COMEBACK_PATH --db ABSOLUTE_MEMORY_DB release --session-id FRESH_SESSION_ID
 ```
 
-The actual injected commands contain the absolute installed executable path; on Windows they use the installation's adjacent `python.exe -I -m comeback.cli`. Copy the injected command exactly. Relative substitutes such as `comeback`, `./comeback`, extra flags, another session ID, or appended shell input are rejected by the hook.
+The actual injected commands contain the absolute installed executable path; on Windows they use the same installation environment's `python.exe -I -m comeback.cli`. Copy the injected command exactly. Relative substitutes such as `comeback`, `./comeback`, extra flags, another session ID, or appended shell input are rejected by the hook.
 
 The checkpoint capability resolves the signed executable once against the repository's captured PATH, fingerprints that absolute file, and executes that same absolute executable with the signed argument array and `shell=False` inside a managed process-tree boundary. With no operator override it uses the signed timeout; `--timeout` may only shorten that limit. Starting any recheck durably revokes the prior checkpoint receipt and human approval under a unique attempt nonce before the command can run. A failure, timeout, interruption, or overlapping/stale completion therefore cannot leave the older evidence authorized. A timeout or surviving background process is stopped and cannot mint a receipt. Windows `.bat` and `.cmd` launchers are refused because Windows may pass them through a command shell even with `shell=False`; use a native executable or an explicit Python/Node executable instead. A successful foreground exit records a receipt containing the repository fingerprint; model-reported output is never evidence. In `HUMAN_REQUIRED`, the developer then approves from a separate native terminal:
 
