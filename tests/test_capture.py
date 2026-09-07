@@ -120,3 +120,6 @@ def test_historical_explanation_does_not_reauthorize_old_revisions(status, guida
     result = capture.explain_session(memory, "old")
     assert result["historical_snapshot"]
     assert guidance in result["next"]
+    if status in {"completed", "failed"}:
+        assert "retained lock" in result["next"]
+        assert "verifying the external target" in result["next"]

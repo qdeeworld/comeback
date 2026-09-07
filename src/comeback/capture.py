@@ -103,7 +103,8 @@ def explain_session(memory: InterventionMemory, session_id: str) -> dict:
                      if run["status"] == "executing" else
                      "Owner must verify the external target and reconcile the unknown outcome before further release work."
                      if run["status"] == "unknown" else
-                     "This run is closed; start a fresh task."),
+                     "This run is closed. Before starting a fresh task, inspect the release lock; "
+                     "the owner must reconcile any retained lock after verifying the external target."),
             "notice": "Historical read-only snapshot, not release authorization. Current lesson revisions are not applied to this history.",
         }
     run = memory.get_verified_run(session_id)
