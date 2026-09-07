@@ -82,7 +82,7 @@ def _lesson_mode(*, probation_success_count: int, unresolved_release_count: int)
     if unresolved_release_count:
         return "HUMAN_REQUIRED"
     # Every fresh intervention and every confirmed failure restarts probation.
-    # One compliant release earns CHECKPOINTED; three earn AUTONOMOUS.
+    # One compliant release earns CHECKPOINTED. The verifier is permanent.
     return mode_for_outcomes(1, probation_success_count)
 
 
@@ -431,9 +431,18 @@ def validate_lesson(body: Any) -> dict[str, Any]:
         probation_success_count=body["probation_success_count"],
         unresolved_release_count=unresolved,
     )
-    if body["current_mode"] != expected_mode:
+    legacy_autonomous = (
+        body["current_mode"] == "AUTONOMOUS"
+        and not unresolved
+        and body["probation_success_count"] >= 3
+    )
+    if body["current_mode"] != expected_mode and not legacy_autonomous:
         raise MemoryIntegrityError("lesson mode differs from its outcome history")
     body = deepcopy(body)
+    # Interpret valid legacy earned-autonomy state under the stricter policy.
+    # Never rewrite the signed intervention or stored historical run. Old open
+    # autonomous runs fail get_verified_run and require a fresh session.
+    body["current_mode"] = expected_mode
     body["unresolved_release_count"] = unresolved
     applied_outcomes = body.get("applied_release_outcomes", {})
     if not isinstance(applied_outcomes, dict) or not all(

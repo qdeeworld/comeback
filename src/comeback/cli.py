@@ -23,6 +23,7 @@ from .base_trust import (
     derive_anchor_key,
 )
 from .diagnostics import diagnose_repository
+from .capture import capture_correction, explain_session
 from .execution import (
     execute_checkpoint,
     execute_release,
@@ -275,6 +276,12 @@ def _parser() -> argparse.ArgumentParser:
 
     base_status = sub.add_parser("base-status")
     base_status.add_argument("--rpc-url")
+
+    capture = sub.add_parser("capture", help="Record a correction interactively in the owner's terminal")
+    capture.add_argument("--session-id")
+    capture.add_argument("--keystore")
+    explain = sub.add_parser("explain", help="Explain a session's remembered requirements without authorizing release")
+    explain.add_argument("--session-id", required=True)
 
     prepare = sub.add_parser("prepare-intervention")
     prepare.add_argument("--session-id", required=True)
@@ -717,6 +724,12 @@ def main() -> None:
                     "after PASS, start a genuinely fresh working agent session in this repository."
                 ),
             }
+        elif args.command == "capture":
+            result = capture_correction(memory, repo_id=repo_id,
+                                        keystore=_keystore_path(args, root),
+                                        session_id=args.session_id, confirm=_confirm_signature)
+        elif args.command == "explain":
+            result = explain_session(memory, args.session_id)
         elif args.command == "prepare-intervention":
             closer = (
                 args.authorized_closer.lower()

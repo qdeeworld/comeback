@@ -667,6 +667,31 @@ def test_historical_source_session_cannot_be_reused_after_a_later_intervention(
     assert memory.all_lessons()[0]["intervention_count"] == 2
 
 
+def test_legacy_autonomy_keeps_history_but_cannot_waive_checks(tmp_path):
+    owner = Account.create()
+    db = tmp_path / "memory.db"
+    with InterventionMemory(db, "repo-a") as memory:
+        lesson = record_with_source(
+            memory, signed_record("repo-a", owner.key.hex(), owner.address)
+        )
+        lesson.update(success_count=3, probation_success_count=3, current_mode="AUTONOMOUS")
+        memory.client.set_entity(memory.LESSON_CATEGORY, lesson["lesson_id"], lesson, status="active")
+        run = memory.start_run(session_id="legacy-open", task_class="release",
+                               area="release_workflow", agent_family="Codex", model="test")
+        run.update(mode="AUTONOMOUS", required_evidence=[])
+        memory.client.set_entity(memory.RUN_CATEGORY, "legacy-open", run, status="open")
+    with InterventionMemory(db, "repo-a") as memory:
+        with pytest.raises(MemoryIntegrityError, match="mode differs"):
+            memory.get_verified_run("legacy-open")
+        fresh = memory.start_run(session_id="new-policy", task_class="release",
+                                 area="release_workflow", agent_family="Codex", model="test")
+        assert fresh["mode"] == "CHECKPOINTED"
+        assert fresh["required_evidence"] == ["release_check_passed"]
+        stored = memory.client.get_entity(memory.LESSON_CATEGORY, lesson["lesson_id"])["body"]
+        assert stored == lesson  # Read-time interpretation does not rewrite signed history.
+        assert memory.get_run("legacy-open")["mode"] == "AUTONOMOUS"
+
+
 def test_new_intervention_immediately_resets_earned_autonomy(tmp_path):
     owner = Account.create()
     memory = InterventionMemory(tmp_path / "memory.db", "repo-a")
@@ -675,7 +700,7 @@ def test_new_intervention_immediately_resets_earned_autonomy(tmp_path):
     )
     first["success_count"] = 10
     first["probation_success_count"] = 10
-    first["current_mode"] = "AUTONOMOUS"
+    first["current_mode"] = "CHECKPOINTED"
     first["revision"] += 1
     memory.client.set_entity(
         memory.LESSON_CATEGORY, first["lesson_id"], first, status="active"

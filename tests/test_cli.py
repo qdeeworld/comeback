@@ -22,12 +22,31 @@ from comeback.signing import intervention_message
 def run_cli(repo: Path, *args: str, expected: int = 0) -> dict:
     completed = subprocess.run(
         [sys.executable, "-m", "comeback.cli", "--repo", str(repo), *args],
+        input="",
         capture_output=True,
         text=True,
         check=False,
     )
     assert completed.returncode == expected, completed.stderr + completed.stdout
     return json.loads(completed.stdout)
+
+
+def test_capture_cli_refuses_noninteractive_signing(tmp_path: Path):
+    result = run_cli(tmp_path, "capture", expected=2)
+    assert result["decision"] == "refuse"
+    assert "native terminal" in result["reason"]
+
+
+def test_explain_cli_uses_exact_session(tmp_path: Path):
+    _, repo_id = repository_identity(tmp_path)
+    with InterventionMemory(tmp_path / ".comeback" / "memory.db", repo_id) as memory:
+        memory.start_run(session_id="ordinary", task_class="low_risk", area="general",
+                         agent_family="Codex", model="test")
+    result = run_cli(tmp_path, "explain", "--session-id", "ordinary")
+    assert result["mode"] == "AUTONOMOUS"
+    assert "No matching correction" in result["why"]
+    missing = run_cli(tmp_path, "explain", "--session-id", "wrong", expected=2)
+    assert missing["decision"] == "refuse"
 
 
 def _commit_repository_anchor(repo: Path, message: str = "repository anchor") -> None:
