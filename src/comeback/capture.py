@@ -87,6 +87,25 @@ def capture_correction(
 
 
 def explain_session(memory: InterventionMemory, session_id: str) -> dict:
+    run = memory.get_run(session_id)
+    if run["status"] != "open":
+        # Outcomes advance lesson revisions. Historical display must not try
+        # to re-authorize an old run against today's lesson revision.
+        return {
+            "session_id": session_id, "workflow": run["area"], "mode": run["mode"],
+            "status": run["status"], "outcome": run.get("outcome"),
+            "historical_snapshot": True,
+            "remembered_requirements_from": run["lesson_ids"],
+            "mandatory_check": run.get("checkpoint_spec"),
+            "recorded_evidence_still_missing": memory.missing_requirements(run),
+            "why": "This is the stored run history, not the current lesson policy or a new permission.",
+            "next": ("Release is executing; do not repeat it. Inspect its outcome first."
+                     if run["status"] == "executing" else
+                     "Owner must verify the external target and reconcile the unknown outcome before further release work."
+                     if run["status"] == "unknown" else
+                     "This run is closed; start a fresh task."),
+            "notice": "Historical read-only snapshot, not release authorization. Current lesson revisions are not applied to this history.",
+        }
     run = memory.get_verified_run(session_id)
     remaining = memory.missing_requirements(run)
     return {
@@ -95,7 +114,9 @@ def explain_session(memory: InterventionMemory, session_id: str) -> dict:
         "mandatory_check": run.get("checkpoint_spec"),
         "recorded_evidence_still_missing": remaining,
         "why": ("A remembered correction keeps this verifier mandatory. "
-                + ("Owner approval is still required." if "human_approval" in run["required_evidence"]
+                + ("Owner approval is still required." if "human_approval" in remaining
+                   else "Owner approval is recorded for this session; release will revalidate it."
+                   if "human_approval" in run["required_evidence"]
                    else "Successful history removed repeat approval, not the verifier."))
                if run["lesson_ids"] else "No matching correction; ordinary repository checks still apply.",
         "next": ("This run is closed; start a fresh task." if run["status"] != "open" else

@@ -29,6 +29,7 @@ from comeback.execution import (
 import comeback.execution as execution_module
 import comeback.memory as memory_module
 from comeback.memory import InterventionMemory, MemoryIntegrityError, release_destination
+from comeback.capture import explain_session
 from comeback.signing import (
     action_spec_digest,
     approval_message,
@@ -324,6 +325,9 @@ def _assert_checkpoint_and_release(tmp_path: Path, memory, owner):
         encode_defunct(text=approval_message(run, approved_at)), private_key=owner.key
     ).signature.hex()
     memory.approve("fresh", approved_at=approved_at, signature=approval)
+    explanation = explain_session(memory, "fresh")
+    assert explanation["recorded_evidence_still_missing"] == []
+    assert "approval is recorded" in explanation["why"]
     marker = tmp_path / "released.txt"
     release, release_exit = execute_release(
         memory,
@@ -334,6 +338,10 @@ def _assert_checkpoint_and_release(tmp_path: Path, memory, owner):
     assert release["outcome"] == "success"
     assert marker.read_text() == "ok"
     assert memory.get_run("fresh")["status"] == "completed"
+    historical = explain_session(memory, "fresh")
+    assert historical["historical_snapshot"] is True
+    assert historical["outcome"] == "success"
+    assert "closed" in historical["next"]
 
 
 def test_repository_cannot_shadow_the_trusted_release_runner(tmp_path: Path):

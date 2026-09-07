@@ -22,6 +22,7 @@ from comeback.signing import intervention_message
 def run_cli(repo: Path, *args: str, expected: int = 0) -> dict:
     completed = subprocess.run(
         [sys.executable, "-m", "comeback.cli", "--repo", str(repo), *args],
+        input="",
         capture_output=True,
         text=True,
         check=False,

@@ -104,3 +104,19 @@ def test_explanation_is_read_only_and_not_a_release_permission(setup, monkeypatc
     explanation = capture.explain_session(memory, "corrected")
     assert "No matching correction" in explanation["why"]
     assert memory.get_run("corrected") == before
+
+
+@pytest.mark.parametrize("status, guidance", [("executing", "do not repeat"),
+                                               ("unknown", "reconcile"),
+                                               ("failed", "closed"),
+                                               ("completed", "closed")])
+def test_historical_explanation_does_not_reauthorize_old_revisions(status, guidance):
+    run = {"session_id": "old", "area": "release_workflow", "mode": "HUMAN_REQUIRED",
+           "status": status, "lesson_ids": ["lesson"], "required_evidence": [],
+           "satisfied_evidence": []}
+    memory = SimpleNamespace(get_run=lambda _: run,
+                             missing_requirements=InterventionMemory.missing_requirements)
+    # No get_verified_run: invoking it would reject historical revisions.
+    result = capture.explain_session(memory, "old")
+    assert result["historical_snapshot"]
+    assert guidance in result["next"]
