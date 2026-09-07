@@ -10,11 +10,13 @@ This repository is a bounded Sibyl hackathon validation spike, not a production 
 2. Sibyl stores the intervention, command specifications, provenance, outcome counts, and current supervision mode.
 3. The process ends.
 4. A fresh supported-agent session receives only a related release request. Authenticated Codex and Windows Claude Code release checks have passed; see the [versioned validation record](evidence/agent-validation-2026-09-06.md) for the exact environments and fixture limits.
-5. Comeback recalls the intervention and selects `HUMAN_REQUIRED`, `CHECKPOINTED`, or `AUTONOMOUS`.
+5. Comeback recalls the intervention: `HUMAN_REQUIRED` requires its check plus owner approval; after a successful release, `CHECKPOINTED` keeps the check mandatory without repeat approval.
 6. Its hook denies recognized raw release commands; the one exact release argument vector recorded in the intervention can run through a one-shot Comeback capability after its requirements pass.
 7. The result is written back to Sibyl, changing the next fresh session's supervision mode.
 
 Unrelated low-risk work remains `AUTONOMOUS`.
+
+Remembered workflows never graduate out of their mandatory check. `AUTONOMOUS` means no matching intervention, not earned permission to skip verification. A new correction or confirmed failure resets the affected workflow to human review. Legacy lessons that earned `AUTONOMOUS` are interpreted as `CHECKPOINTED` without changing their signed intervention or historical runs; start a fresh agent session after upgrading, because old open autonomous runs cannot authorize a release under the new policy.
 
 ## Prerequisites
 
@@ -157,7 +159,23 @@ comeback create-owner
 
 Run owner, signing, approval, and reconciliation commands yourself in a native terminal—not through the coding agent. `comeback create-owner` asks you to enter and confirm a new password. That password encrypts only `.comeback/owner-keystore.json`, which holds the local owner key used to sign interventions, approvals, and reconciliations. When Base trust is enabled, the same owner key can also sign and send the repository's Base transactions, and its address must hold enough Base Sepolia ETH for those transactions. The password is not a Sibyl or Codex password, does not hold funds by itself, and is never sent to Base.
 
-Prepare one intervention using commands that can execute directly without `&&`, pipes, redirection, or a shell interpreter. Store the prepared record inside ignored `.comeback/` so it does not make the checkpoint dirty. For a real Git release, use a direct HTTPS URL with no embedded username or token. For credential-free local validation, use the absolute path to a disposable bare repository. In both cases use an explicit source-to-destination refspec; do not sign a mutable remote name such as `origin`.
+For guided correction capture, run this yourself in a native terminal after creating the owner:
+
+```text
+comeback capture
+```
+
+Choose the exact corrected session from the displayed recent release/migration sessions (or supply `--session-id`). Describe the missed check, explicitly choose one agent or both, then enter each executable and its arguments one per line. No shell quotes or handwritten JSON are needed, including for Windows paths with spaces. Blank input ends an argument list; `:cancel` aborts before signing. Review the signed scope and commands, type `SIGN`, then unlock your owner key. Capture does not execute either command, collect a chat transcript, or infer an unobserved command from a stored hash. Your incident description remains your report, not independently verified evidence. The guided path uses 600-second command timeouts; use the advanced path below for custom timeouts.
+
+To understand a session's recorded requirements:
+
+```text
+comeback explain --session-id EXACT_SESSION_ID
+```
+
+This is a read-only explanation, not authorization: the release capability still checks evidence age, current repository state, and execution locks. A stale session requires a fresh working session. Guided capture reduces command/JSON preparation steps; human time savings have not yet been measured.
+
+Alternatively, prepare one intervention using commands that can execute directly without `&&`, pipes, redirection, or a shell interpreter. Store the prepared record inside ignored `.comeback/` so it does not make the checkpoint dirty. For a real Git release, use a direct HTTPS URL with no embedded username or token. For credential-free local validation, use the absolute path to a disposable bare repository. In both cases use an explicit source-to-destination refspec; do not sign a mutable remote name such as `origin`.
 
 macOS or Linux example:
 

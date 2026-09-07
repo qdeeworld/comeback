@@ -608,8 +608,10 @@ def test_release_capability_is_one_shot(tmp_path: Path):
         execute_release(memory, session_id="fresh", root=tmp_path)
 
 
-def test_earned_autonomous_run_still_uses_capability_and_records_outcome(
+@pytest.mark.parametrize("agent_family", ["Codex", "ClaudeCode"])
+def test_repeated_success_keeps_checkpoint_and_records_outcome(
     tmp_path: Path,
+    agent_family: str,
 ):
     memory, owner = _supervised_memory(tmp_path)
     for index, session_id in enumerate(("fresh", "success-two", "success-three")):
@@ -628,15 +630,20 @@ def test_earned_autonomous_run_still_uses_capability_and_records_outcome(
             _approve(memory, owner, session_id)
         execute_release(memory, session_id=session_id, root=tmp_path)
 
+    memory.close()
+    memory = InterventionMemory(tmp_path / ".comeback" / "memory.db", "repo-a")
     autonomous = memory.start_run(
         session_id="earned-autonomous",
         task_class="release",
         area="release_workflow",
-        agent_family="Codex",
+        agent_family=agent_family,
         model="test",
     )
-    assert autonomous["mode"] == "AUTONOMOUS"
-    assert autonomous["required_evidence"] == []
+    assert autonomous["mode"] == "CHECKPOINTED"
+    assert autonomous["required_evidence"] == ["release_check_passed"]
+    with pytest.raises(MemoryIntegrityError, match="release_check_passed"):
+        execute_release(memory, session_id="earned-autonomous", root=tmp_path)
+    execute_checkpoint(memory, session_id="earned-autonomous", root=tmp_path)
 
     result, exit_code = execute_release(
         memory,
@@ -648,7 +655,55 @@ def test_earned_autonomous_run_still_uses_capability_and_records_outcome(
     assert memory.get_run("earned-autonomous")["status"] == "completed"
 
 
-def test_earned_autonomous_git_release_pins_current_commit_without_receipt(
+@pytest.mark.parametrize("case", ["failed_check", "stale_receipt", "changed_code"])
+@pytest.mark.parametrize("agent_family", ["Codex", "ClaudeCode"])
+def test_checkpointed_history_does_not_bypass_verification_errors(
+    tmp_path: Path, monkeypatch, case: str, agent_family: str,
+):
+    memory, owner = _supervised_memory(
+        tmp_path, require_clean_git=False,
+        checkpoint_argv=[sys.executable, "-c",
+                         "from pathlib import Path; raise SystemExit(7 if Path('.comeback/fail-check').exists() else 0)"],
+    )
+    # Real successful capability executions, not manufactured success counters.
+    for index in range(3):
+        session_id = "fresh" if index == 0 else f"success-{index}"
+        if index:
+            memory.start_run(session_id=session_id, task_class="release",
+                             area="release_workflow", agent_family=agent_family, model="test")
+        execute_checkpoint(memory, session_id=session_id, root=tmp_path)
+        if index == 0:
+            _approve(memory, owner, session_id)
+        execute_release(memory, session_id=session_id, root=tmp_path)
+    memory.close()
+    with InterventionMemory(tmp_path / ".comeback" / "memory.db", "repo-a") as memory:
+        run = memory.start_run(session_id="verification-error", task_class="release",
+                               area="release_workflow", agent_family=agent_family, model="test")
+        assert run["mode"] == "CHECKPOINTED"
+        marker = tmp_path / "released.txt"
+        marker.write_text("previous release", encoding="utf-8")
+        if case == "failed_check":
+            (tmp_path / ".comeback" / "fail-check").write_text("fail", encoding="utf-8")
+            result, code = execute_checkpoint(memory, session_id=run["session_id"], root=tmp_path)
+            assert code == 7
+            assert result["decision"] == "checkpoint_failed"
+            with pytest.raises(MemoryIntegrityError, match="release_check_passed"):
+                execute_release(memory, session_id=run["session_id"], root=tmp_path)
+        else:
+            execute_checkpoint(memory, session_id=run["session_id"], root=tmp_path)
+            if case == "stale_receipt":
+                monkeypatch.setattr(memory_module, "_MAX_CHECKPOINT_AGE", timedelta(seconds=-1))
+                expected = "older than 15 minutes"
+            else:
+                (tmp_path / ".gitignore").write_text(".comeback/\nreleased.txt\nchanged.txt\n", encoding="utf-8")
+                expected = "state changed"
+            with pytest.raises(MemoryIntegrityError, match=expected):
+                execute_release(memory, session_id=run["session_id"], root=tmp_path)
+        assert memory.get_run(run["session_id"])["status"] == "open"
+        assert marker.read_text(encoding="utf-8") == "previous release"
+
+
+def test_repeated_git_release_still_requires_checkpoint_receipt(
     tmp_path: Path,
 ):
     remote = tmp_path / "remote.git"
@@ -681,8 +736,11 @@ def test_earned_autonomous_git_release_pins_current_commit_without_receipt(
         agent_family="Codex",
         model="test",
     )
-    assert autonomous["mode"] == "AUTONOMOUS"
+    assert autonomous["mode"] == "CHECKPOINTED"
     assert autonomous["checkpoint_receipt"] is None
+    with pytest.raises(MemoryIntegrityError, match="release_check_passed"):
+        execute_release(memory, session_id="git-autonomous", root=root)
+    execute_checkpoint(memory, session_id="git-autonomous", root=root)
 
     result, exit_code = execute_release(
         memory, session_id="git-autonomous", root=root

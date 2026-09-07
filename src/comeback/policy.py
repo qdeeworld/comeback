@@ -511,8 +511,8 @@ def tool_succeeded(event: dict[str, Any], *, expected_marker: str = "") -> bool:
 
 
 def mode_for_outcomes(failures: int, successes: int) -> str:
-    if successes >= failures + 2:
-        return "AUTONOMOUS"
+    # Outcomes retire repeated human approval, never the remembered verifier.
+    # AUTONOMOUS is reserved for a run with no matching lesson.
     if successes >= failures:
         return "CHECKPOINTED"
     return "HUMAN_REQUIRED"

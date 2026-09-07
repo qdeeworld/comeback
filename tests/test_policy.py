@@ -55,7 +55,8 @@ def test_explicit_release_intent_is_classified(prompt):
 def test_supervision_evolves_with_outcomes():
     assert mode_for_outcomes(1, 0) == "HUMAN_REQUIRED"
     assert mode_for_outcomes(1, 1) == "CHECKPOINTED"
-    assert mode_for_outcomes(1, 3) == "AUTONOMOUS"
+    assert mode_for_outcomes(1, 3) == "CHECKPOINTED"
+    assert mode_for_outcomes(1, 100) == "CHECKPOINTED"
 
 
 @pytest.mark.parametrize(
