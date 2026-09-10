@@ -387,10 +387,44 @@ def _looks_like_auth_error(completed: subprocess.CompletedProcess[str]) -> bool:
     return any(marker in output for marker in markers)
 
 
+def _windows_installation_roots() -> tuple[Path, Path]:
+    """Query Windows itself; ProgramFiles/SystemRoot env vars are not trust roots."""
+    import ctypes
+    from ctypes import wintypes
+
+    try:
+        kernel = ctypes.WinDLL("kernel32.dll", winmode=0x00000800)
+        shell = ctypes.WinDLL("shell32.dll", winmode=0x00000800)
+        system_directory = kernel.GetSystemDirectoryW
+        system_directory.argtypes = [wintypes.LPWSTR, wintypes.UINT]
+        system_directory.restype = wintypes.UINT
+        folder_path = shell.SHGetFolderPathW
+        folder_path.argtypes = [wintypes.HWND, ctypes.c_int, wintypes.HANDLE,
+                               wintypes.DWORD, wintypes.LPWSTR]
+        folder_path.restype = ctypes.c_long
+        system_buffer = ctypes.create_unicode_buffer(32768)
+        programs_buffer = ctypes.create_unicode_buffer(260)
+        length = system_directory(system_buffer, len(system_buffer))
+        # CSIDL_PROGRAM_FILES, SHGFP_TYPE_CURRENT; never create or redirect it.
+        result = folder_path(None, 0x0026, None, 0, programs_buffer)
+        if not 0 < length < len(system_buffer) or result != 0:
+            raise OSError("Windows installation-folder lookup failed")
+        system, programs = Path(system_buffer.value), Path(programs_buffer.value)
+        if not system.is_absolute() or not programs.is_absolute():
+            raise OSError("Windows returned a non-absolute installation folder")
+        return system, programs
+    except (OSError, AttributeError, ValueError) as exc:
+        raise DiagnosticFailure(
+            "WINDOWS_INSTALLATION_ROOTS_UNAVAILABLE",
+            "Cannot establish trusted Windows system and Program Files locations",
+            next_action="Repair the Windows folder lookup; do not replace it with environment-provided paths.",
+        ) from exc
+
+
 def _git_probe_argv(root: Path) -> list[str]:
     """Pin the read to installed Git, not a repository/PATH-provided shim."""
     if os.name == "nt":
-        programs = Path(os.environ.get("ProgramFiles", "C:/Program Files"))
+        _, programs = _windows_installation_roots()
         candidates = [programs / "Git/cmd/git.exe", programs / "Git/bin/git.exe"]
     else:
         candidates = [Path(path) for path in ("/usr/bin/git", "/opt/homebrew/bin/git", "/usr/local/bin/git")]
@@ -428,11 +462,10 @@ def _trusted_probe_shell(executable: str, root: Path) -> bool:
         if path.is_relative_to(root.resolve()) or not path.is_file():
             return False
         if os.name == "nt":
-            windows = Path(os.environ.get("SystemRoot", "C:/Windows"))
-            programs = Path(os.environ.get("ProgramFiles", "C:/Program Files"))
+            system, programs = _windows_installation_roots()
             allowed = [
-                windows / "System32/cmd.exe",
-                windows / "System32/WindowsPowerShell/v1.0/powershell.exe",
+                system / "cmd.exe",
+                system / "WindowsPowerShell/v1.0/powershell.exe",
                 programs / "PowerShell/7/pwsh.exe",
                 programs / "Git/bin/bash.exe",
                 programs / "Git/usr/bin/bash.exe",

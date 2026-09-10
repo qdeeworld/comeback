@@ -174,6 +174,26 @@ def test_missing_trusted_git_has_clear_refusal(monkeypatch, tmp_path):
     assert error.value.code == "TRUSTED_GIT_NOT_FOUND"
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Requires native Windows folder APIs")
+def test_windows_environment_cannot_redirect_trusted_installation(monkeypatch, tmp_path):
+    system, programs = diagnostics._windows_installation_roots()
+    fake = tmp_path / "spoof-install"
+    fake_git = fake / "Git/cmd/git.exe"
+    fake_git.parent.mkdir(parents=True)
+    fake_git.write_text("fake Git outside the repository")
+    fake_cmd = fake / "System32/cmd.exe"
+    fake_cmd.parent.mkdir(parents=True)
+    fake_cmd.write_text("fake shell outside the repository")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    monkeypatch.setenv("ProgramFiles", str(fake))
+    monkeypatch.setenv("SystemRoot", str(fake))
+    assert diagnostics._windows_installation_roots() == (system, programs)
+    assert Path(diagnostics._git_probe_argv(repo)[0]).is_relative_to(programs)
+    assert not diagnostics._trusted_probe_shell(str(fake_cmd), repo)
+    assert diagnostics._trusted_probe_shell(str(system / "cmd.exe"), repo)
+
+
 @pytest.mark.parametrize("command", [
     '& "C:\\Program Files\\Git\\cmd\\git.exe" rev-parse --show-toplevel',
     '"C:\\Program Files\\Git\\cmd\\git.exe" rev-parse --show-toplevel',
