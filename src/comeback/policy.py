@@ -234,7 +234,7 @@ def _segment_comeback_action(words: list[str]) -> str | None:
         )
     if executable in {"eval", "iex", "invoke-expression"} and index + 1 < len(words):
         try:
-            nested = _shell_words(" ".join(words[index + 1 :])))
+            nested = _shell_words(" ".join(words[index + 1 :]))
         except ValueError:
             return None
         nested_actions = {
@@ -410,30 +410,15 @@ def _command_after_same_directory_prefix(
         raw_target = raw_target[3:].strip()
     if raw_target.lower().startswith("-literalpath "):
         raw_target = raw_target[len("-literalpath ") :].strip()
-    # Validate shell literalness BEFORE resolving the path. Path.resolve()
-    # can erase a component such as child$(command)/.. while the shell still
-    # executes the substitution before entering this directory. This optional
-    # convenience prefix must never add evaluation to an exact capability.
-    # Use the unprefixed injected command for paths outside this narrow grammar.
-    if not raw_target or any(
-        ord(character) < 32 or character in "$`%!^"
-        for character in raw_target
+    if (
+        len(raw_target) >= 2
+        and raw_target[0] in {"'", '"'}
+        and raw_target[-1] == raw_target[0]
     ):
-        return None
-    if raw_target[0] in {"'", '"'}:
-        if len(raw_target) < 2 or raw_target[-1] != raw_target[0]:
-            return None
         raw_target = raw_target[1:-1]
-        if any(character in "\"'" for character in raw_target):
-            return None
-    elif any(
-        character.isspace() or character in "\"';&|<>(){}[]*?~#@,"
-        for character in raw_target
-    ):
+    if not raw_target or raw_target[0] in {"$", "`"}:
         return None
-    if not raw_target or raw_target.startswith("-"):
-        return None
-    target = Path(raw_target)
+    target = Path(raw_target).expanduser()
     if not target.is_absolute():
         target = Path(working_directory) / target
     try:
