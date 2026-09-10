@@ -25,6 +25,7 @@ except ModuleNotFoundError:  # pragma: no cover - Python 3.10 only
 from .identity import BaseTrustConfig, repository_configuration
 from .installer import _is_comeback_handler
 from .memory import InterventionMemory, MemoryIntegrityError
+from .policy import invokes_configured_argv
 from .signing import intervention_message
 
 
@@ -380,26 +381,271 @@ def _looks_like_auth_error(completed: subprocess.CompletedProcess[str]) -> bool:
         "authentication required",
         "authentication failed",
         "unauthorized",
-        "401",
         "missing api key",
         "invalid api key",
     )
     return any(marker in output for marker in markers)
 
 
+def _windows_installation_roots() -> tuple[Path, Path]:
+    """Query Windows itself; ProgramFiles/SystemRoot env vars are not trust roots."""
+    import ctypes
+    from ctypes import wintypes
+
+    try:
+        kernel = ctypes.WinDLL("kernel32.dll", winmode=0x00000800)
+        shell = ctypes.WinDLL("shell32.dll", winmode=0x00000800)
+        system_directory = kernel.GetSystemDirectoryW
+        system_directory.argtypes = [wintypes.LPWSTR, wintypes.UINT]
+        system_directory.restype = wintypes.UINT
+        folder_path = shell.SHGetFolderPathW
+        folder_path.argtypes = [wintypes.HWND, ctypes.c_int, wintypes.HANDLE,
+                               wintypes.DWORD, wintypes.LPWSTR]
+        folder_path.restype = ctypes.c_long
+        system_buffer = ctypes.create_unicode_buffer(32768)
+        programs_buffer = ctypes.create_unicode_buffer(260)
+        length = system_directory(system_buffer, len(system_buffer))
+        # CSIDL_PROGRAM_FILES, SHGFP_TYPE_CURRENT; never create or redirect it.
+        result = folder_path(None, 0x0026, None, 0, programs_buffer)
+        if not 0 < length < len(system_buffer) or result != 0:
+            raise OSError("Windows installation-folder lookup failed")
+        system, programs = Path(system_buffer.value), Path(programs_buffer.value)
+        if not system.is_absolute() or not programs.is_absolute():
+            raise OSError("Windows returned a non-absolute installation folder")
+        return system, programs
+    except (OSError, AttributeError, ValueError) as exc:
+        raise DiagnosticFailure(
+            "WINDOWS_INSTALLATION_ROOTS_UNAVAILABLE",
+            "Cannot establish trusted Windows system and Program Files locations",
+            next_action="Repair the Windows folder lookup; do not replace it with environment-provided paths.",
+        ) from exc
+
+
+def _git_probe_argv(root: Path) -> list[str]:
+    """Pin the read to installed Git, not a repository/PATH-provided shim."""
+    if os.name == "nt":
+        _, programs = _windows_installation_roots()
+        candidates = [programs / "Git/cmd/git.exe", programs / "Git/bin/git.exe"]
+    else:
+        candidates = [Path(path) for path in ("/usr/bin/git", "/opt/homebrew/bin/git", "/usr/local/bin/git")]
+    for candidate in candidates:
+        try:
+            path = candidate.resolve(strict=True)
+            if path.is_file() and not path.is_relative_to(root.resolve()):
+                return [str(path), "rev-parse", "--show-toplevel"]
+        except (OSError, ValueError, RuntimeError):
+            continue
+    raise DiagnosticFailure(
+        "TRUSTED_GIT_NOT_FOUND",
+        "No supported installed Git executable is available for the sandbox probe",
+        next_action="Install Git in its standard system location; do not substitute a repository script or PATH shim.",
+    )
+
+
+def _git_probe_command(root: Path) -> str:
+    argv = _git_probe_argv(root)
+    return subprocess.list2cmdline(argv) if os.name == "nt" else shlex.join(argv)
+
+
+def _trusted_probe_shell(executable: str, root: Path) -> bool:
+    """Only installed platform shells, never repo-local or arbitrary PATH tools."""
+    path = Path(executable)
+    if not path.is_absolute():
+        if "/" in executable or "\\" in executable:
+            return False
+        found = shutil.which(executable)
+        if not found:
+            return False
+        path = Path(found)
+    try:
+        path = path.resolve(strict=True)
+        if path.is_relative_to(root.resolve()) or not path.is_file():
+            return False
+        if os.name == "nt":
+            system, programs = _windows_installation_roots()
+            allowed = [
+                system / "cmd.exe",
+                system / "WindowsPowerShell/v1.0/powershell.exe",
+                programs / "PowerShell/7/pwsh.exe",
+                programs / "Git/bin/bash.exe",
+                programs / "Git/usr/bin/bash.exe",
+            ]
+        else:
+            allowed = [Path(directory) / name for directory in ("/bin", "/usr/bin")
+                       for name in ("sh", "bash", "zsh")]
+        return any(candidate.is_file() and path == candidate.resolve() for candidate in allowed)
+    except (OSError, ValueError, RuntimeError):
+        return False
+
+
+def _git_probe_command_matches(command: str, root: Path) -> bool:
+    """Accept the exact read, including a native shell's literal wrapper."""
+    expected = _git_probe_argv(root)
+    if invokes_configured_argv(command, expected, working_directory=root):
+        return True
+    try:
+        # These are literal diagnostic wrappers, not arbitrary shell programs.
+        # In particular, an unquoted Windows executable path keeps backslashes;
+        # POSIX shlex defaults would silently consume them as escape characters.
+        lexer = shlex.shlex(command, posix=True)
+        lexer.whitespace_split = True
+        lexer.commenters = ""
+        lexer.escape = ""
+        words = list(lexer)
+    except ValueError:
+        return False
+    if len(words) < 3:
+        return False
+    if not _trusted_probe_shell(words[0], root):
+        return False
+    shell = words[0].replace("\\", "/").rsplit("/", 1)[-1].lower()
+    if shell in {"sh", "bash", "zsh"}:
+        if len(words) != 3 or words[1] not in {"-c", "-lc"}:
+            return False
+    elif shell in {"powershell", "powershell.exe", "pwsh", "pwsh.exe"}:
+        if words[-2].lower() != "-command" or any(
+            flag.lower() not in {"-nologo", "-noprofile", "-noninteractive"}
+            for flag in words[1:-2]
+        ):
+            return False
+    elif shell in {"cmd", "cmd.exe"}:
+        switches = [word.lower() for word in words[1:]]
+        boundary = next((index + 1 for index, word in enumerate(switches)
+                         if word in {"/c", "/k"}), None)
+        if boundary is None or any(
+            flag.lower() not in {"/d", "/s", "/q"}
+            for flag in words[1:boundary]
+        ):
+            return False
+        # cmd accepts either a single quoted payload or bare command words.
+        # Do not normalize away chains, redirections, variable expansion or
+        # trust overrides; only this literal read may establish readiness.
+        payload = words[boundary + 1:]
+        return payload == expected or (
+            len(payload) == 1 and invokes_configured_argv(payload[0], expected, working_directory=root)
+        )
+    else:
+        return False
+    return invokes_configured_argv(words[-1], expected, working_directory=root)
+
+
+def _verify_codex_git_readiness(
+    completed: subprocess.CompletedProcess[str], *, root: Path, session_id: str
+) -> dict[str, Any]:
+    """Use actual tool results, never a model's claim that Git worked."""
+    threads: list[str] = []
+    commands: list[dict[str, Any]] = []
+    unexpected_items: list[str] = []
+    for line in completed.stdout.splitlines():
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(event, dict):
+            continue
+        if event.get("type") == "thread.started":
+            threads.append(event.get("thread_id"))
+        if event.get("type") in {"item.started", "item.updated", "item.completed"}:
+            item = event.get("item")
+            if not isinstance(item, dict):
+                unexpected_items.append("malformed_item")
+                continue
+            kind = item.get("type")
+            if kind == "command_execution":
+                if event.get("type") == "item.completed":
+                    commands.append(item)
+                command = item.get("command")
+                if not isinstance(command, str) or not _git_probe_command_matches(command, root):
+                    unexpected_items.append("unexpected_command")
+            elif kind not in {"agent_message", "reasoning", "todo_list", "error"}:
+                # File edits, MCP tools, searches, and future unknown tools must
+                # not silently disappear from a supposedly read-only proof.
+                unexpected_items.append(str(kind))
+    proof: dict[str, Any] = {
+        "sandbox": "workspace-write",
+        "session_id": session_id,
+        "command": _git_probe_command(root),
+        "proven": False,
+        "trust_modified": None if unexpected_items else False,
+        "completed_command_count": len(commands),
+        "session_matches": threads == [session_id],
+        "unexpected_items": unexpected_items,
+    }
+    recovery = (
+        "Do not create an owner or sign a correction yet. Verify read-only Git access "
+        "inside the same Codex sandbox/account, not only the operator terminal. "
+        "Review repository ownership and sandbox setup with the owner or administrator. "
+        "Do not use safe.directory=* or disable the sandbox. See README: Windows Git ownership."
+    )
+    if unexpected_items:
+        recovery = (
+            "The canary used an unexpected tool or command; inspect the checkout and Git "
+            "configuration for changes before continuing. No automatic rollback was attempted. "
+            + recovery
+        )
+    # Codex also emits nonfatal startup advisories as item.type=error. Those
+    # are not command failures; require the actual command's status/exit below.
+    if not unexpected_items and len(commands) == 1 and threads == [session_id]:
+        item = commands[0]
+        command = item.get("command")
+        output = item.get("aggregated_output")
+        exit_code = item.get("exit_code")
+        if isinstance(command, str) and _git_probe_command_matches(command, root):
+            proof["exit_code"] = exit_code
+            if isinstance(output, str) and "detected dubious ownership" in output.lower():
+                raise DiagnosticFailure(
+                    "GIT_OWNERSHIP_UNSAFE",
+                    "Git refused repository ownership inside the Codex sandbox; hook activation succeeded",
+                    next_action=recovery,
+                    details={"git_readiness": proof},
+                )
+            if (
+                type(exit_code) is int and exit_code == 0
+                and item.get("status") == "completed"
+                and isinstance(output, str) and output.strip()
+            ):
+                try:
+                    actual = Path(output.strip())
+                    matches = actual.is_absolute() and actual.resolve() == root.resolve()
+                except (OSError, ValueError):
+                    matches = False
+                if matches:
+                    return {**proof, "proven": True, "repository": str(root)}
+    raise DiagnosticFailure(
+        "SANDBOX_GIT_NOT_PROVEN",
+        "No unique successful Git tool result for this repository in the fresh Codex sandbox",
+        next_action=recovery,
+        details={"git_readiness": proof},
+    )
+
+
+def _git_probe_environment(database: Path) -> dict[str, str]:
+    # Preserve authentication and normal account configuration, but not
+    # ephemeral repository selection, executable helpers or config injection.
+    # Never mutate the operator's environment or persistent Git configuration.
+    environment = {key: value for key, value in os.environ.items()
+                   if not key.upper().startswith("GIT_")}
+    environment["COMEBACK_MEMORY_DB"] = str(database)
+    return environment
+
+
 def _run_codex_activation_probe(
     *, root: Path, repo_id: str, executable: str
 ) -> dict[str, Any]:
-    """Prove the installed hook runs in a new Codex process without a trust bypass."""
+    """Prove hook activation AND Git access in the working sandbox."""
 
     canary_id = uuid.uuid4().hex
     with tempfile.TemporaryDirectory(prefix="comeback-codex-canary-") as directory:
         database = Path(directory) / "memory.db"
-        environment = os.environ.copy()
-        environment["COMEBACK_MEMORY_DB"] = str(database)
+        environment = _git_probe_environment(database)
         prompt = (
-            f"Comeback activation canary {canary_id}. Do not use tools or change files. "
-            "Reply exactly COMEBACK_DOCTOR_OK."
+            f"Comeback activation canary {canary_id}. Run exactly one shell command: "
+            f"{_git_probe_command(root)}. Use this exact absolute Git executable, not bare git. "
+            "In PowerShell, use its call operator & before the quoted executable. "
+            "This is a read-only Git readiness check. "
+            "Do not change files, run other commands, add safe.directory exceptions, "
+            "change Git configuration, request unsandboxed execution, or retry a failure. "
+            "Report the actual result and stop."
         )
         argv = [
             executable,
@@ -407,7 +653,7 @@ def _run_codex_activation_probe(
             "--ephemeral",
             "--json",
             "--sandbox",
-            "read-only",
+            "workspace-write",
             "-C",
             str(root),
             prompt,
@@ -431,7 +677,7 @@ def _run_codex_activation_probe(
                     "activation": {
                         "fresh_process": True,
                         "ephemeral_session": True,
-                        "sandbox": "read-only",
+                        "sandbox": "workspace-write",
                         "hook_trust_bypass": False,
                         "sibyl_write": False,
                     }
@@ -443,7 +689,7 @@ def _run_codex_activation_probe(
         activation = {
             "fresh_process": True,
             "ephemeral_session": True,
-            "sandbox": "read-only",
+            "sandbox": "workspace-write",
             "hook_trust_bypass": False,
             "codex_exit_code": completed.returncode,
             "sibyl_write": bool(runs),
@@ -490,6 +736,13 @@ def _run_codex_activation_probe(
                 next_action="Repair the Codex client error, then rerun `comeback doctor`.",
                 details={"activation": activation},
             )
+        try:
+            activation["git_readiness"] = _verify_codex_git_readiness(
+                completed, root=root, session_id=str(runs[0]["session_id"])
+            )
+        except DiagnosticFailure as exc:
+            exc.details["activation"] = activation
+            raise
         return activation
 
 
@@ -972,6 +1225,7 @@ def diagnose_repository(
                     "enforcement": enforcement,
                     "agent_activation_proven": True,
                     "pretool_enforcement_proven": True,
+                    "sandbox_git_proven": activation["git_readiness"]["proven"],
                 }
             else:
                 with tempfile.TemporaryDirectory(prefix="comeback-doctor-") as directory:

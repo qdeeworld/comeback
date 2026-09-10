@@ -156,6 +156,18 @@ def _client_response(argv: list[str]) -> subprocess.CompletedProcess[str] | None
     return None
 
 
+def _git_ready_stream(repo: Path, session_id: str, **overrides) -> str:
+    item = {
+        "type": "command_execution", "command": diagnostics._git_probe_command(repo),
+        "aggregated_output": str(repo.resolve()) + "\n", "exit_code": 0,
+        "status": "completed", **overrides,
+    }
+    return "\n".join(json.dumps(event) for event in [
+        {"type": "thread.started", "thread_id": session_id},
+        {"type": "item.completed", "item": item},
+    ])
+
+
 def test_codex_doctor_proves_real_fresh_process_without_trust_bypass(
     monkeypatch, tmp_path: Path
 ) -> None:
@@ -183,7 +195,8 @@ def test_codex_doctor_proves_real_fresh_process_without_trust_bypass(
         assert "--ephemeral" in argv
         assert "--dangerously-bypass-hook-trust" not in argv
         database = Path(kwargs["env"]["COMEBACK_MEMORY_DB"])
-        is_activation = argv[argv.index("--sandbox") + 1] == "read-only"
+        is_activation = "Comeback activation canary" in argv[-1]
+        assert argv[argv.index("--sandbox") + 1] == "workspace-write"
         with InterventionMemory(database, "repo-id") as memory:
             run = memory.start_run(
                 session_id=(
@@ -207,7 +220,7 @@ def test_codex_doctor_proves_real_fresh_process_without_trust_bypass(
                     reason="remembered intervention requires release_check_passed",
                 )
         output = (
-            '{"type":"turn.completed"}\n'
+            _git_ready_stream(repo, "fresh-codex-session")
             if is_activation
             else "Comeback HUMAN_REQUIRED: remembered intervention requires evidence"
         )
@@ -224,6 +237,7 @@ def test_codex_doctor_proves_real_fresh_process_without_trust_bypass(
     assert check["activation"]["hook_trust_bypass"] is False
     assert check["activation"]["sibyl_write"] is True
     assert check["activation"]["session_id"] == "fresh-codex-session"
+    assert check["sandbox_git_proven"] is True
     assert check["pretool_enforcement_proven"] is True
     assert check["enforcement"]["session_id"] == "fresh-pretool-session"
     assert check["enforcement"]["side_effect_absent"] is True
@@ -372,7 +386,7 @@ def test_base_active_doctor_replays_only_verified_sibyl_intervention(
             return client
         agent_processes += 1
         database = Path(kwargs["env"]["COMEBACK_MEMORY_DB"])
-        is_activation = argv[argv.index("--sandbox") + 1] == "read-only"
+        is_activation = "Comeback activation canary" in argv[-1]
         session_id = (
             "base-activation-session" if is_activation else "base-pretool-session"
         )
@@ -389,7 +403,7 @@ def test_base_active_doctor_replays_only_verified_sibyl_intervention(
         )
         assert prompt_result is not None
         if is_activation:
-            output = '{"type":"turn.completed"}\n'
+            output = _git_ready_stream(repo, session_id)
         else:
             script = next(database.parent.glob("release_candidate.py"))
             relative_script = script.relative_to(repo).as_posix()
