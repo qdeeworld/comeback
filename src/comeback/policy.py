@@ -410,15 +410,30 @@ def _command_after_same_directory_prefix(
         raw_target = raw_target[3:].strip()
     if raw_target.lower().startswith("-literalpath "):
         raw_target = raw_target[len("-literalpath ") :].strip()
-    if (
-        len(raw_target) >= 2
-        and raw_target[0] in {"'", '"'}
-        and raw_target[-1] == raw_target[0]
+    # Check shell literalness before Path.resolve() can erase a component
+    # containing an evaluated expression followed by /.. Use the exact,
+    # unprefixed capability for paths outside this conservative grammar. Reject
+    # control operators even inside quotes: single quotes are not protective in
+    # cmd.exe, and this matcher is shared by multiple shell dialects.
+    if not raw_target or any(
+        ord(character) < 32 or character in "$`%!^;&|<>()"
+        for character in raw_target
     ):
-        raw_target = raw_target[1:-1]
-    if not raw_target or raw_target[0] in {"$", "`"}:
         return None
-    target = Path(raw_target).expanduser()
+    if raw_target[0] in {"'", '"'}:
+        if len(raw_target) < 2 or raw_target[-1] != raw_target[0]:
+            return None
+        raw_target = raw_target[1:-1]
+        if any(character in "\"'" for character in raw_target):
+            return None
+    elif any(
+        character.isspace() or character in "\"';&|<>(){}[]*?~#@,"
+        for character in raw_target
+    ):
+        return None
+    if not raw_target or raw_target.startswith("-"):
+        return None
+    target = Path(raw_target)
     if not target.is_absolute():
         target = Path(working_directory) / target
     try:
