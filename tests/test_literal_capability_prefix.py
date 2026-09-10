@@ -81,3 +81,30 @@ def test_rejected_prefix_would_have_a_real_shell_side_effect(tmp_path):
     )
     assert result.stdout == "CAPABILITY_PLACEHOLDER"
     assert (tmp_path / "PREFIX_SIDE_EFFECT").is_file()
+
+
+@pytest.mark.parametrize("operator", ["&", "|", "<", ">", "(", ")"])
+@pytest.mark.parametrize("quote", ["'", '"'])
+def test_quoted_control_operator_cannot_be_erased_by_dotdot(tmp_path, operator, quote):
+    expected = "/trusted/bin/comeback release --session-id expected"
+    command = f"cd {quote}{tmp_path}/child{operator}suffix/..{quote} && {expected}"
+    assert not invocation_matches(command, expected, working_directory=tmp_path)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Harmless native cmd.exe semantics witness")
+def test_single_quotes_do_not_protect_cmd_prefix_from_side_effects(tmp_path):
+    expected = "echo CAPABILITY_PLACEHOLDER"
+    command = (
+        f"cd '{tmp_path}/child & mkdir PREFIX_SIDE_EFFECT & rem /..' && {expected}"
+    )
+    # Unlike POSIX and PowerShell, cmd.exe does not treat single quotes as
+    # quoting. The ampersands still separate commands before the capability.
+    result = subprocess.run(
+        ["cmd.exe", "/d", "/c", command],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    assert (tmp_path / "PREFIX_SIDE_EFFECT").is_dir(), result.stdout + result.stderr
+    assert not invocation_matches(command, expected, working_directory=tmp_path)

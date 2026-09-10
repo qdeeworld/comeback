@@ -412,9 +412,11 @@ def _command_after_same_directory_prefix(
         raw_target = raw_target[len("-literalpath ") :].strip()
     # Check shell literalness before Path.resolve() can erase a component
     # containing an evaluated expression followed by /.. Use the exact,
-    # unprefixed capability for paths outside this conservative grammar.
+    # unprefixed capability for paths outside this conservative grammar. Reject
+    # control operators even inside quotes: single quotes are not protective in
+    # cmd.exe, and this matcher is shared by multiple shell dialects.
     if not raw_target or any(
-        ord(character) < 32 or character in "$`%!^"
+        ord(character) < 32 or character in "$`%!^;&|<>()"
         for character in raw_target
     ):
         return None
