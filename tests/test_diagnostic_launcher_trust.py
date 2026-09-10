@@ -36,7 +36,9 @@ def configured_fixture(tmp_path, monkeypatch, agent):
         lambda _: RepositoryConfig(root=root, repo_id="diagnostic-repo", base_trust=None),
     )
     factory = hook_groups if agent == "codex" else claude_hook_groups
-    document = {"hooks": factory(hook)}
+    # Match the installed JSON tree: factories may reuse a dict internally,
+    # but separately configured lifecycle handlers must mutate independently.
+    document = json.loads(json.dumps({"hooks": factory(hook)}))
     config = root / (".codex/hooks.json" if agent == "codex" else ".claude/settings.json")
     config.parent.mkdir()
     return root, config, document, cli
@@ -45,10 +47,26 @@ def configured_fixture(tmp_path, monkeypatch, agent):
 @pytest.mark.parametrize("agent", ["codex", "claude"])
 def test_doctor_accepts_only_current_installation_canonical_launcher(tmp_path, monkeypatch, agent):
     _root, _config, document, cli = configured_fixture(tmp_path, monkeypatch, agent)
-    for groups in document["hooks"].values():
+    for event_name, groups in document["hooks"].items():
         for group in groups:
             for handler in group["hooks"]:
-                assert diagnostics._capability_executable(handler, agent=agent) == str(cli)
+                assert diagnostics._capability_executable(handler, agent=agent, event_name=event_name) == str(cli)
+
+
+@pytest.mark.parametrize("agent", ["codex", "claude"])
+def test_doctor_uses_corresponding_lifecycle_timeout(tmp_path, monkeypatch, agent):
+    _root, _config, document, cli = configured_fixture(tmp_path, monkeypatch, agent)
+    for event_name, timeout in {"UserPromptSubmit": 30, "PreToolUse": 42, "Stop": 25}.items():
+        document["hooks"][event_name][0]["hooks"][0]["timeout"] = timeout
+    factory_name = "hook_groups" if agent == "codex" else "claude_hook_groups"
+    monkeypatch.setattr(diagnostics, factory_name, lambda _hook: copy.deepcopy(document["hooks"]))
+    for event_name, groups in document["hooks"].items():
+        handler = groups[0]["hooks"][0]
+        assert diagnostics._capability_executable(handler, agent=agent, event_name=event_name) == str(cli)
+        altered = {**handler, "timeout": handler["timeout"] - 1}
+        with pytest.raises(diagnostics.DiagnosticFailure) as failure:
+            diagnostics._capability_executable(altered, agent=agent, event_name=event_name)
+        assert failure.value.code == "HOOK_LAUNCHER_UNTRUSTED"
 
 
 @pytest.mark.parametrize("agent", ["codex", "claude"])
@@ -56,6 +74,7 @@ def test_doctor_accepts_only_current_installation_canonical_launcher(tmp_path, m
     "prefix", "suffix", "comment_with_valid_cli", "other_cli", "wrong_family",
     "windows_prefix", "async_stop", "duplicate", "wrong_matcher", "non_string",
     "non_string_windows", "duplicate_without_windows",
+    "timeout_prompt", "timeout_pretool", "timeout_stop", "timeout_missing",
 ])
 def test_doctor_rejects_modified_config_before_any_subprocess(tmp_path, monkeypatch, agent, mutation):
     root, config, document, cli = configured_fixture(tmp_path, monkeypatch, agent)
@@ -87,6 +106,14 @@ def test_doctor_rejects_modified_config_before_any_subprocess(tmp_path, monkeypa
                 handler["commandWindows"] = "Write-Output unexpected; " + handler["commandWindows"]
         elif mutation == "async_stop" and event == "Stop":
             handler["async"] = True
+        elif mutation == "timeout_prompt" and event == "UserPromptSubmit":
+            handler["timeout"] = 1
+        elif mutation == "timeout_pretool" and event == "PreToolUse":
+            handler["timeout"] = 1
+        elif mutation == "timeout_stop" and event == "Stop":
+            handler["timeout"] = 1
+        elif mutation == "timeout_missing":
+            handler.pop("timeout")
         elif mutation == "duplicate":
             groups[0]["hooks"].append(copy.deepcopy(handler))
         elif mutation == "wrong_matcher" and event == "PreToolUse":
@@ -132,6 +159,25 @@ def test_direct_claude_probe_cannot_bypass_launcher_verification(tmp_path, monke
             session_id="fresh-diagnostic", temporary=tmp_path,
         )
     assert failure.value.code == "HOOK_LAUNCHER_UNTRUSTED"
+
+
+def test_direct_claude_probe_uses_the_validated_lifecycle_timeout(tmp_path, monkeypatch):
+    root, _config, document, _cli = configured_fixture(tmp_path, monkeypatch, "claude")
+    handler = document["hooks"]["UserPromptSubmit"][0]["hooks"][0]
+    calls = []
+    expected = {"hookSpecificOutput": {"additionalContext": "fixture context"}}
+
+    def probe(argv, **kwargs):
+        calls.append(kwargs["timeout"])
+        return diagnostics.subprocess.CompletedProcess(argv, 0, json.dumps(expected), "")
+
+    monkeypatch.setattr(diagnostics, "_git_bash", lambda: "fixture-git-bash")
+    monkeypatch.setattr(diagnostics.subprocess, "run", probe)
+    assert diagnostics._invoke_installed_hook(
+        root=root, handler=handler, agent="claude", database=tmp_path / "memory.db",
+        session_id="fresh-diagnostic", temporary=tmp_path,
+    ) == expected
+    assert calls == [handler["timeout"]] == [30]
 
 
 @pytest.mark.parametrize("agent", ["codex", "claude"])

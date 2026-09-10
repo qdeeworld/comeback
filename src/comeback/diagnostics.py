@@ -133,7 +133,9 @@ def _comeback_handlers(path: Path, *, agent: str) -> dict[str, dict[str, Any]]:
     return found
 
 
-def _capability_executable(handler: dict[str, Any], *, agent: str) -> str:
+def _capability_executable(
+    handler: dict[str, Any], *, agent: str, event_name: str = "UserPromptSubmit"
+) -> str:
     """Bind a probe to this installation, not a path supplied by hook config.
 
     The generated shell spelling is deliberately exact. Parsing out a plausible
@@ -144,7 +146,7 @@ def _capability_executable(handler: dict[str, Any], *, agent: str) -> str:
     try:
         hook = resolve_hook_executable(allow_path_fallback=False)
         groups = hook_groups(hook) if agent == "codex" else claude_hook_groups(hook)
-        expected = groups["UserPromptSubmit"][0]["hooks"][0]
+        expected = groups[event_name][0]["hooks"][0]
     except (OSError, RuntimeError) as exc:
         raise DiagnosticFailure(
             "CAPABILITY_EXECUTABLE_MISSING",
@@ -156,6 +158,7 @@ def _capability_executable(handler: dict[str, Any], *, agent: str) -> str:
         or handler.get("command") != expected["command"]
         or (agent == "codex" and handler.get("commandWindows") != expected["commandWindows"])
         or handler.get("async", False) is not False
+        or handler.get("timeout") != expected["timeout"]
     ):
         raise DiagnosticFailure(
             "HOOK_LAUNCHER_UNTRUSTED",
@@ -259,7 +262,7 @@ def _invoke_installed_hook(
         input=json.dumps(event),
         capture_output=True,
         text=True,
-        timeout=60,
+        timeout=handler["timeout"],
         check=False,
     )
     if completed.returncode != 0:
@@ -1221,8 +1224,8 @@ def diagnose_repository(
             capability_executable = _capability_executable(handler, agent=agent)
             # Validate every lifecycle handler before starting a client: a
             # matching command with different execution flags is not equivalent.
-            for lifecycle_handler in handlers.values():
-                _capability_executable(lifecycle_handler, agent=agent)
+            for lifecycle_name, lifecycle_handler in handlers.items():
+                _capability_executable(lifecycle_handler, agent=agent, event_name=lifecycle_name)
             client = _client_check(agent, root)
             if agent == "codex":
                 intervention_records = (
