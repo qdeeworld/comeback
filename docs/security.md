@@ -1,0 +1,21 @@
+# Trust and execution boundaries
+
+[Back to Comeback](../README.md) · [Installation](installation.md) · [Workflows](workflows.md) · [Base](base.md) · [Security](security.md) · [Validation](validation.md)
+
+## Security boundary
+
+Comeback protects the configured release argument vector through its exact capability. Its raw-command detection is only defense in depth, not a general shell sandbox or complete command mediation layer. It recognizes direct release commands and common indirection, but a custom executable, unsupported tool, or another process can hide or perform an equivalent action. The capability is narrower: it receives no runtime command override and executes the preflight-resolved absolute executable with the signed argument array and `shell=False`. Windows batch launchers are not accepted. Never place passwords, private keys, API tokens, or credential-bearing URLs in a checkpoint or release argument array; use an operating-system credential helper or a future broker.
+
+The checkpoint receipt correlates the signed checkpoint specification, repository/execution-context fingerprint, timestamps, session, and zero exit code. Its digest is an integrity and correlation checksum, not a signature, remote attestation, or independent proof that the check was semantically sufficient. The fingerprint covers Git-visible state, effective Git configuration and hooks, the resolved direct executable and direct file arguments, and selected environment variables at preflight. It does not freeze ignored files, inputs opened transitively by a custom executable, remote network responses, or changes made concurrently after the final preflight check. Only the direct Git-push capability pins its source artifact to an immutable approved commit. An attacker running as the same operating-system user who can replace the Sibyl database or call its local write API can forge or substitute receipt state.
+
+For production, release credentials must be unavailable to the coding-agent process and exposed only through a separately authenticated Comeback-controlled broker. This local spike does not provide that credential boundary. Without active Base trust, an agent with unrestricted filesystem access can delete or replace the repository-local Sibyl database, release lock, owner keystore, or first-use repository/owner anchor. With active Base trust, Comeback can fail a protected release closed when the selected owner or anchored first intervention is absent, but it still cannot protect arbitrary local state from the same operating-system user. The committed repository anchor detects ordinary missing or changed anchor state; it is not protection from an attacker who can alter both the working tree and trusted Git history. Base does not by itself isolate release credentials.
+
+Do not use this spike to hold production deployment credentials or describe it as production security enforcement.
+
+Hooks, the supervisor installation, selected environment and repository identity are trusted local inputs, not an isolation boundary against the same operating-system user. In particular, do not use an editable Comeback installation whose source lives in the repository being supervised. Keeping the installation separate prevents that accidental overlap, but does not make it immutable to an unrestricted local process. An owner-signed checkpoint approves a command, not the semantic adequacy of every future version of its tests.
+
+Windows runners use Job Objects; POSIX runners use process groups. A deliberately detached descendant can escape POSIX process-group containment, so this is not an absolute guarantee that every descendant has stopped. Keep the control files on a supported local filesystem: synced/network filesystems, unsupported hardlinks and Windows path limits can prevent operation. A failed or unknown action must be reconciled, never retried just to complete a demo.
+
+## Successful execution versus external outcome
+
+A successful capability process is not independent proof of a new deployment or changed destination. For example, an up-to-date Git push may complete successfully without creating a second release. Check the actual destination before describing an external result, and follow [reconciliation](workflows.md#unknown-release-outcomes-and-reconciliation) when an outcome is uncertain.

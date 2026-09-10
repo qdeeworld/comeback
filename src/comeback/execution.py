@@ -18,6 +18,7 @@ from .memory import (
     utc_now,
 )
 from .signing import action_spec_digest, checkpoint_receipt_digest
+from .runner import _cleanup_scratch, _read_control_bytes, _scratch_path
 
 
 _ATOMIC_WRITE_FLAGS = (
@@ -204,6 +205,8 @@ def _action_context(root: Path, spec: dict[str, Any]) -> dict[str, Any]:
             "PATHEXT",
             "PYTHONHOME",
             "PYTHONPATH",
+            "PYTHONUSERBASE",
+            "PYTHONSTARTUP",
             "NODE_OPTIONS",
             "NODE_PATH",
             "RUBYOPT",
@@ -214,7 +217,17 @@ def _action_context(root: Path, spec: dict[str, Any]) -> dict[str, Any]:
             "SHELL",
             "VIRTUAL_ENV",
             "LD_PRELOAD",
+            "LD_LIBRARY_PATH",
             "DYLD_INSERT_LIBRARIES",
+            "DYLD_LIBRARY_PATH",
+            "DYLD_FALLBACK_LIBRARY_PATH",
+            "JAVA_TOOL_OPTIONS",
+            "JDK_JAVA_OPTIONS",
+            "_JAVA_OPTIONS",
+            "CLASSPATH",
+            "DOTNET_STARTUP_HOOKS",
+            "DOTNET_ADDITIONAL_DEPS",
+            "DOTNET_SHARED_STORE",
             "SSH_AUTH_SOCK",
         }
         or key.startswith(("GIT_", "AWS_", "CLOUDFLARE_", "VERCEL_"))
@@ -618,7 +631,7 @@ def _write_all(descriptor: int, payload: bytes) -> None:
 def _publish_lock(path: Path, record: dict[str, Any]) -> None:
     """Publish a complete lock atomically without an empty O_EXCL window."""
 
-    temporary = path.with_name(f".{path.name}.{record['nonce']}.tmp")
+    temporary = _scratch_path(path, record["nonce"], "lock-tmp")
     descriptor = os.open(temporary, _ATOMIC_WRITE_FLAGS, 0o600)
     try:
         try:
@@ -644,7 +657,7 @@ def _publish_lock(path: Path, record: dict[str, Any]) -> None:
                 "release lock could not be published atomically on this filesystem"
             ) from exc
     finally:
-        temporary.unlink(missing_ok=True)
+        _cleanup_scratch(temporary)
 
 
 def _update_release_lock(
@@ -658,7 +671,7 @@ def _update_release_lock(
     if current != expected:
         raise MemoryIntegrityError("release lock changed during capability execution")
     updated = {**current, **changes}
-    temporary = path.with_name(f".{path.name}.{current['nonce']}.update")
+    temporary = _scratch_path(path, current["nonce"], "lock-update")
     descriptor = os.open(temporary, _ATOMIC_WRITE_FLAGS, 0o600)
     try:
         try:
@@ -675,7 +688,7 @@ def _update_release_lock(
             raise MemoryIntegrityError("release lock changed during capability execution")
         os.replace(temporary, path)
     finally:
-        temporary.unlink(missing_ok=True)
+        _cleanup_scratch(temporary)
     return read_release_lock(root, repo_id) or updated
 
 
@@ -864,8 +877,8 @@ def _stop_process_tree(process: subprocess.Popen[str]) -> None:
 
 def _barrier_paths(lock_path: Path, nonce: str) -> tuple[Path, Path]:
     return (
-        lock_path.with_name(f".{lock_path.name}.{nonce}.ready"),
-        lock_path.with_name(f".{lock_path.name}.{nonce}.start"),
+        _scratch_path(lock_path, nonce, "ready"),
+        _scratch_path(lock_path, nonce, "start"),
     )
 
 
@@ -913,40 +926,11 @@ def _runner_launch_command(
 
 
 def _read_runner_ready(path: Path) -> str:
-    if os.name != "nt":
-        return path.read_text(encoding="utf-8")
-    # Python's CRT-backed open can discard GetLastError and expose only EACCES.
-    # Preserve the native code so a sharing violation is not confused with an
-    # ACL denial. Share deletion as well, to coexist with atomic publication.
-    import ctypes
-    from ctypes import wintypes
-
-    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
-    kernel.CreateFileW.argtypes = [
-        wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p,
-        wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE,
-    ]
-    kernel.CreateFileW.restype = wintypes.HANDLE
-    kernel.ReadFile.argtypes = [
-        wintypes.HANDLE, ctypes.c_void_p, wintypes.DWORD,
-        ctypes.POINTER(wintypes.DWORD), ctypes.c_void_p,
-    ]
-    kernel.ReadFile.restype = wintypes.BOOL
-    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
-    kernel.CloseHandle.restype = wintypes.BOOL
-    handle = kernel.CreateFileW(str(path), 0x80000000, 1 | 2 | 4, None, 3, 0x80, None)
-    if handle == ctypes.c_void_p(-1).value:
-        raise ctypes.WinError(ctypes.get_last_error())
     try:
-        buffer = ctypes.create_string_buffer(4097)
-        count = wintypes.DWORD()
-        if not kernel.ReadFile(handle, buffer, len(buffer), ctypes.byref(count), None):
-            raise ctypes.WinError(ctypes.get_last_error())
-        if count.value > 4096:
-            raise MemoryIntegrityError("release runner readiness record exceeds size limit")
-        return buffer.raw[:count.value].decode("utf-8")
-    finally:
-        kernel.CloseHandle(handle)
+        payload = _read_control_bytes(path)
+    except ValueError as exc:
+        raise MemoryIntegrityError("release runner readiness record exceeds size limit") from exc
+    return payload.decode("utf-8")
 
 
 def _wait_for_runner_ready(
@@ -1006,8 +990,7 @@ def _start_barrier_temporary(path: Path, nonce: str) -> Path:
     # Do not repeat the already-long lock name and nonce: that can exceed
     # Windows MAX_PATH even when the final barrier itself fits. Bind the
     # bounded staging name to both inputs while retaining O_EXCL ownership.
-    digest = hashlib.sha256((path.name + "\0" + nonce).encode()).hexdigest()[:32]
-    return path.with_name(f".cb-{digest}.tmp")
+    return _scratch_path(path, nonce, "start-tmp")
 
 
 def _open_start_barrier(path: Path, nonce: str) -> None:
@@ -1030,7 +1013,7 @@ def _open_start_barrier(path: Path, nonce: str) -> None:
                 "capability start barrier could not be published atomically"
             ) from exc
     finally:
-        temporary.unlink(missing_ok=True)
+        _cleanup_scratch(temporary)
 
 
 def _run_contained_command(
@@ -1101,8 +1084,8 @@ def _run_contained_command(
             f"capability could not start: {type(exc).__name__}"
         ) from exc
     finally:
-        ready.unlink(missing_ok=True)
-        start.unlink(missing_ok=True)
+        _cleanup_scratch(ready)
+        _cleanup_scratch(start)
 
 
 def execute_checkpoint(
@@ -1422,8 +1405,8 @@ def execute_release(
             f"release capability could not start: {type(exc).__name__}: {exc}"
         ) from exc
     finally:
-        ready_path.unlink(missing_ok=True)
-        start_path.unlink(missing_ok=True)
+        _cleanup_scratch(ready_path)
+        _cleanup_scratch(start_path)
         if not retain_lock:
             try:
                 clear_release_lock(

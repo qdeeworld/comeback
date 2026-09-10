@@ -143,7 +143,19 @@ def pretool_release(
 
 
 def decision(output: dict[str, Any]) -> str:
-    return str(output.get("hookSpecificOutput", {}).get("permissionDecision", "allow"))
+    if not isinstance(output, dict):
+        raise ValueError("PreToolUse hook evidence must be an object")
+    specific = output.get("hookSpecificOutput")
+    if not isinstance(specific, dict) or specific.get("hookEventName") != "PreToolUse":
+        raise ValueError("missing explicit PreToolUse hook evidence")
+    value = specific.get("permissionDecision")
+    if isinstance(value, str) and value in {"allow", "deny"}:
+        return value
+    # Comeback's allow response adds context without bypassing the harness's
+    # own approval policy. Empty output is not evidence of that response.
+    if value is None and isinstance(specific.get("additionalContext"), str) and specific["additionalContext"].strip():
+        return "allow"
+    raise ValueError("invalid PreToolUse hook decision evidence")
 
 
 def _write_fixture_repository(root: Path) -> None:

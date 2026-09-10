@@ -37,6 +37,10 @@ _COMMAND_SEPARATORS = {"&&", "||", ";", "|", "&", "\n", "(", ")", "{", "}"}
 _CONTROL_PREFIXES = {"if", "then", "else", "elif", "while", "until", "do"}
 
 
+class CommandParseError(ValueError):
+    """A shell command cannot safely be classified; it is not a safe negative."""
+
+
 def classify_task(prompt: str) -> tuple[str, str]:
     if _MIGRATION_PROMPT.search(prompt):
         return "release", "migration_workflow"
@@ -56,10 +60,7 @@ def command_from_event(event: dict[str, Any]) -> str:
 def is_release_action(event: dict[str, Any]) -> bool:
     if event.get("tool_name") != "Bash":
         return False
-    try:
-        words = _shell_words(command_from_event(event))
-    except ValueError:
-        return False
+    words = _shell_words(command_from_event(event))
     return _contains_release_action(words)
 
 
@@ -74,10 +75,7 @@ def comeback_capability_action(event: dict[str, Any]) -> str | None:
 
     if event.get("tool_name") != "Bash":
         return None
-    try:
-        words = _shell_words(command_from_event(event))
-    except ValueError:
-        return None
+    words = _shell_words(command_from_event(event))
     actions = {
         action
         for segment in _command_segments(words)
@@ -92,8 +90,14 @@ def _shell_words(command: str) -> list[str]:
     # a newline inside quotes as part of the quoted argument.
     lexer.whitespace = " \t\r"
     lexer.whitespace_split = True
+    # Do not use shlex's comment stripping: it treats a mid-word # as a
+    # comment, unlike Bash, and can hide a later command. Unbalanced quoting
+    # (including in a shell comment) must reach the hook as an explicit refusal.
     lexer.commenters = ""
-    return list(lexer)
+    try:
+        return list(lexer)
+    except ValueError as exc:
+        raise CommandParseError("shell quoting is ambiguous or incomplete") from exc
 
 
 def _clean_word(word: str) -> str:
@@ -124,6 +128,81 @@ def _command_segments(words: list[str]) -> list[list[str]]:
 
 def _contains_release_action(words: list[str]) -> bool:
     return any(_segment_is_release(segment) for segment in _command_segments(words))
+
+
+def _command_index(words: list[str]) -> int:
+    """Skip simple literal assignments, control words and leading redirects."""
+    index = 0
+    while index < len(words):
+        word = words[index]
+        if re.match(r"[A-Za-z_][A-Za-z_0-9]*=", word) or word.lower() in _CONTROL_PREFIXES:
+            index += 1
+            continue
+        redirect = re.fullmatch(r"\d*(?:<<<|<<-?|<>|>>?|<)(.*)", word)
+        if redirect:
+            if redirect.group(1):
+                index += 1
+            elif index + 1 < len(words):
+                index += 2
+            else:
+                raise CommandParseError("redirection has no literal destination")
+            continue
+        break
+    return index
+
+
+def _wrapper_tail(executable: str, words: list[str]) -> list[str] | None:
+    """Unwrap explicit common options for detection, never for authorization."""
+    value_options = {
+        "sudo": {"-u", "--user", "-g", "--group", "-h", "--host", "-p", "--prompt", "-C", "--close-from", "-D", "--chdir", "-R", "--chroot", "-T", "--command-timeout", "-r", "--role", "-t", "--type"},
+        "env": {"-u", "--unset", "-C", "--chdir"},
+        "exec": {"-a"},
+        "timeout": {"-s", "--signal", "-k", "--kill-after"},
+        "command": set(),
+        "nohup": set(),
+    }
+    flag_options = {
+        "sudo": {"-n", "--non-interactive", "-E", "--preserve-env", "-H", "--set-home", "-S", "--stdin", "-b", "--background"},
+        "env": {"-i", "--ignore-environment", "-0", "--null"},
+        "exec": {"-c", "-l"},
+        "timeout": {"--preserve-status", "--foreground", "--verbose"},
+        "command": {"-p"},
+        "nohup": set(),
+    }
+    if executable not in value_options:
+        return None
+    index = 0
+    while index < len(words):
+        word = words[index]
+        if word == "--":
+            index += 1
+            break
+        if not word.startswith("-") or word == "-":
+            break
+        if executable == "command" and word in {"-v", "-V"}:
+            return []  # Command lookup, not execution.
+        if word in value_options[executable]:
+            if index + 1 >= len(words):
+                raise CommandParseError(f"{executable} option has no value")
+            index += 2
+        elif word in flag_options[executable] or (
+            word.startswith("--") and "=" in word
+            and word.split("=", 1)[0] in value_options[executable]
+        ):
+            index += 1
+        elif any(word.startswith(option) and len(word) > len(option)
+                 for option in value_options[executable] if len(option) == 2):
+            index += 1
+        else:
+            raise CommandParseError(f"unsupported {executable} wrapper option")
+    if executable == "env":
+        while index < len(words) and re.match(r"[A-Za-z_][A-Za-z_0-9]*=", words[index]):
+            index += 1
+    if executable == "timeout":
+        if index >= len(words) or not re.fullmatch(r"\d+(?:\.\d+)?[smhd]?", words[index]):
+            raise CommandParseError("timeout requires a literal duration")
+        index += 1
+    return words[index:]
 
 
 def _comeback_subcommand(arguments: list[str]) -> str | None:
@@ -196,34 +275,18 @@ def _segment_comeback_action(words: list[str]) -> str | None:
     if not words:
         return None
     normalized = [_clean_word(word) for word in words]
-    index = 0
-    while index < len(normalized) and "=" in words[index] and not words[index].startswith("="):
-        index += 1
-    while index < len(normalized) and normalized[index] in _CONTROL_PREFIXES:
-        index += 1
+    index = _command_index(words)
     if index >= len(normalized):
         return None
     executable = _executable_name(words[index])
-    if executable in {"command", "exec", "sudo"}:
-        index += 1
-        while index < len(normalized) and words[index].startswith("-"):
-            index += 1
-        return _segment_comeback_action(words[index:])
-    if executable == "env":
-        index += 1
-        while index < len(normalized) and (
-            words[index].startswith("-") or "=" in words[index]
-        ):
-            index += 1
-        return _segment_comeback_action(words[index:])
+    wrapper = _wrapper_tail(executable, words[index + 1 :])
+    if wrapper is not None:
+        return _segment_comeback_action(wrapper)
     if executable in _SHELLS:
         payload = _shell_payload(executable, words, normalized, index)
         if payload is None:
             return None
-        try:
-            nested = _shell_words(payload)
-        except ValueError:
-            return None
+        nested = _shell_words(payload)
         nested_actions = {
             action
             for segment in _command_segments(nested)
@@ -233,10 +296,7 @@ def _segment_comeback_action(words: list[str]) -> str | None:
             "multiple" if nested_actions else None
         )
     if executable in {"eval", "iex", "invoke-expression"} and index + 1 < len(words):
-        try:
-            nested = _shell_words(" ".join(words[index + 1 :]))
-        except ValueError:
-            return None
+        nested = _shell_words(" ".join(words[index + 1 :]))
         nested_actions = {
             action
             for segment in _command_segments(nested)
@@ -246,13 +306,12 @@ def _segment_comeback_action(words: list[str]) -> str | None:
             "multiple" if nested_actions else None
         )
     raw_tail = words[index + 1 :]
-    tail = normalized[index + 1 :]
     if executable == "comeback":
         return _comeback_subcommand(raw_tail)
-    if executable == "py" or executable.startswith("python"):
-        for module_index, argument in enumerate(tail[:-1]):
-            if argument == "-m" and tail[module_index + 1] == "comeback.cli":
-                return _comeback_subcommand(raw_tail[module_index + 2 :])
+    if _interpreter_family(executable) == "python":
+        entrypoint = _interpreter_entrypoint(executable, raw_tail)
+        if entrypoint is not None and entrypoint[:2] == ("module", "comeback.cli"):
+            return _comeback_subcommand(entrypoint[2])
     return None
 
 
@@ -260,41 +319,21 @@ def _segment_is_release(words: list[str]) -> bool:
     if not words:
         return False
     normalized = [_clean_word(word) for word in words]
-    index = 0
-
-    while index < len(normalized) and "=" in words[index] and not words[index].startswith("="):
-        index += 1
-    while index < len(normalized) and normalized[index] in _CONTROL_PREFIXES:
-        index += 1
+    index = _command_index(words)
     if index >= len(normalized):
         return False
 
     executable = _executable_name(words[index])
-    if executable in {"command", "exec", "sudo"}:
-        index += 1
-        while index < len(normalized) and words[index].startswith("-"):
-            index += 1
-        return _segment_is_release(words[index:])
-    if executable == "env":
-        index += 1
-        while index < len(normalized) and (
-            words[index].startswith("-") or "=" in words[index]
-        ):
-            index += 1
-        return _segment_is_release(words[index:])
+    wrapper = _wrapper_tail(executable, words[index + 1 :])
+    if wrapper is not None:
+        return _segment_is_release(wrapper)
     if executable in _SHELLS:
         payload = _shell_payload(executable, words, normalized, index)
         if payload is None:
             return False
-        try:
-            return _contains_release_action(_shell_words(payload))
-        except ValueError:
-            return False
+        return _contains_release_action(_shell_words(payload))
     if executable in {"eval", "iex", "invoke-expression"} and index + 1 < len(words):
-        try:
-            return _contains_release_action(_shell_words(" ".join(words[index + 1 :])))
-        except ValueError:
-            return False
+        return _contains_release_action(_shell_words(" ".join(words[index + 1 :])))
 
     tail = normalized[index + 1 :]
     if executable == "git" and _git_arguments(tail)[:1] == ["push"]:
@@ -315,9 +354,10 @@ def _segment_is_release(words: list[str]) -> bool:
         return True
     if _segment_comeback_action(words) == "release":
         return True
-    if (executable == "py" or executable.startswith("python")) and tail:
-        script = next((word for word in tail if not word.startswith("-")), "")
-        return script in {"release_candidate.py", "release-candidate.py"}
+    if _interpreter_family(executable) == "python":
+        entrypoint = _interpreter_entrypoint(executable, words[index + 1 :])
+        return bool(entrypoint is not None and entrypoint[0] == "script"
+                    and _clean_word(entrypoint[1]) in {"release_candidate.py", "release-candidate.py"})
     return executable in {"release_candidate.py", "release-candidate.py"}
 
 
@@ -454,26 +494,31 @@ def invocation_matches(
     return candidate is not None and candidate == expected_invocation.strip()
 
 
-def invokes_configured_argv(
+def detects_configured_argv(
     command: str,
     argv: list[str],
     *,
     working_directory: str | Path | None = None,
 ) -> bool:
-    """Recognize the literal configured action vector across supported shells.
+    """Detect a configured raw action, without authorizing any equivalent form.
 
-    This is deliberately an exact argv comparison, not equivalence analysis.
-    It closes the important case where a configured executable is outside the
-    built-in release vocabulary, while arbitrary wrappers remain outside the
-    raw-command defense-in-depth boundary.
+    Direct interpreter/script variants and common explicit wrappers are treated
+    conservatively as protected. Only invocation_matches can allow a capability;
+    this detector never reconstructs or changes the signed executable vector.
+    Arbitrary script contents and other processes remain outside this boundary.
     """
 
     candidate = _command_after_same_directory_prefix(command, working_directory)
     if candidate is None:
-        return False
+        # A prefix outside the exact authorization grammar must not hide the
+        # later configured action from this refusal-only detector.
+        candidate = command
     candidate = candidate.strip()
     if candidate.startswith("& "):
         candidate = candidate[2:].strip()
+    # Parse first even when another shell's rendering might happen to compare
+    # equal: a lexical failure is an explicit uncertainty, never a safe miss.
+    words = _shell_words(candidate)
     renderings = {shlex.join(argv)}
     try:
         import subprocess
@@ -483,12 +528,172 @@ def invokes_configured_argv(
         pass
     if candidate in renderings:
         return True
+    if any(_segment_invokes_configured(segment, argv, working_directory)
+           for segment in _command_segments(words)):
+        return True
     for posix in (True, False):
         try:
             if shlex.split(candidate, posix=posix) == argv:
                 return True
         except ValueError:
             continue
+    return False
+
+
+def invokes_configured_argv(
+    command: str,
+    argv: list[str],
+    *,
+    working_directory: str | Path | None = None,
+) -> bool:
+    """Match a literal argv vector, including for the read-only doctor probe.
+
+    Keep this strict: detectors may broaden refusals, but callers establishing
+    an allowed diagnostic invocation must not accept prefixes or extra actions.
+    """
+    candidate = _command_after_same_directory_prefix(command, working_directory)
+    if candidate is None:
+        return False
+    candidate = candidate.strip()
+    if candidate.startswith("& "):
+        candidate = candidate[2:].strip()
+    import subprocess
+
+    if candidate in {shlex.join(argv), subprocess.list2cmdline(argv)}:
+        return True
+    for posix in (True, False):
+        try:
+            if shlex.split(candidate, posix=posix) == argv:
+                return True
+        except ValueError:
+            continue
+    return False
+
+
+def _interpreter_family(executable: str) -> str | None:
+    if executable == "py" or re.fullmatch(r"python(?:\d+(?:\.\d+)*)?", executable):
+        return "python"
+    if executable in {"node", "nodejs"}:
+        return "node"
+    return None
+
+
+def _interpreter_entrypoint(executable: str, arguments: list[str]) -> tuple[str, str, list[str]] | None:
+    """Find a direct Python/Node entry point for refusal-only classification.
+
+    Interpreter options precede the script/module; they are not themselves
+    script names. Inline programs and stdin are deliberately not interpreted.
+    Unknown option grammar is uncertainty, never evidence of a safe command.
+    """
+    family = _interpreter_family(executable)
+    index = 0
+    while index < len(arguments):
+        argument = arguments[index]
+        index += 1
+        if argument == "--":
+            return ("script", arguments[index], arguments[index + 1 :]) if index < len(arguments) else None
+        if argument == "-":
+            return None
+        if not argument.startswith("-"):
+            return "script", argument, arguments[index:]
+        if argument in {"--help", "--version", "-h", "-V", "-?"}:
+            return None
+        if family == "python":
+            if executable == "py" and re.fullmatch(r"-(?:\d+(?:\.\d+)*(?:-\d+)?|V:.+)", argument):
+                continue
+            if argument in {"--help-env", "--help-xoptions", "--help-all"}:
+                return None
+            if argument == "--check-hash-based-pycs":
+                if index >= len(arguments):
+                    raise CommandParseError("Python option has no value")
+                index += 1
+                continue
+            if argument.startswith("--check-hash-based-pycs="):
+                continue
+            # CPython accepts clustered flags and attached -W/-X/-m values.
+            options = argument[1:]
+            position = 0
+            while position < len(options):
+                option = options[position]
+                position += 1
+                if option in "bBdEiIOPqRsSuvx":
+                    continue
+                if option in "hV?":
+                    return None
+                if option == "c":
+                    return None
+                if option not in {"W", "X", "m"}:
+                    raise CommandParseError("unsupported Python interpreter option")
+                value = options[position:]
+                if not value:
+                    if index >= len(arguments):
+                        raise CommandParseError("Python option has no value")
+                    value = arguments[index]
+                    index += 1
+                if option == "m":
+                    return "module", value, arguments[index:]
+                break  # Everything after -W/-X is its value, not more flags.
+        elif family == "node":
+            if argument in {"-e", "--eval", "-p", "--print", "-v"} or argument.startswith(("--eval=", "--print=")):
+                return None
+            value_options = {"-r", "--require", "--import", "--loader", "--experimental-loader", "--env-file", "--env-file-if-exists"}
+            if argument in value_options:
+                if index >= len(arguments):
+                    raise CommandParseError("Node option has no value")
+                index += 1
+            elif "=" in argument and argument.split("=", 1)[0] in value_options:
+                continue
+            elif argument not in {"--no-warnings", "--trace-warnings", "--use-strict", "--enable-source-maps", "--disable-proto=delete", "--disable-proto=throw", "--test"}:
+                raise CommandParseError("unsupported Node interpreter option")
+    return None
+
+
+def _segment_invokes_configured(
+    words: list[str], argv: list[str], working_directory: str | Path | None
+) -> bool:
+    if not words or not argv:
+        return False
+    index = _command_index(words)
+    if index >= len(words):
+        return False
+    words = words[index:]
+    executable = _executable_name(words[0])
+    wrapper = _wrapper_tail(executable, words[1:])
+    if wrapper is not None:
+        return _segment_invokes_configured(wrapper, argv, working_directory)
+    if executable in _SHELLS:
+        payload = _shell_payload(executable, words, [_clean_word(word) for word in words], 0)
+        return payload is not None and any(
+            _segment_invokes_configured(segment, argv, working_directory)
+            for segment in _command_segments(_shell_words(payload))
+        )
+    if executable in {"eval", "iex", "invoke-expression"}:
+        return any(
+            _segment_invokes_configured(segment, argv, working_directory)
+            for segment in _command_segments(_shell_words(" ".join(words[1:])))
+        )
+    expected = _executable_name(argv[0])
+    family = _interpreter_family(executable)
+    if executable != expected and not (family and family == _interpreter_family(expected)):
+        return False
+    # Added arguments cannot turn a known entry point into an unprotected one.
+    # This broadens refusal only, not the exact one-shot authorization grammar.
+    if len(words) >= len(argv) and words[1:len(argv)] == argv[1:]:
+        return True
+    if family:
+        expected_entry = _interpreter_entrypoint(expected, argv[1:])
+        actual_entry = _interpreter_entrypoint(executable, words[1:])
+        if expected_entry is None or actual_entry is None:
+            return False
+        if expected_entry[0] != actual_entry[0]:
+            return False
+        if expected_entry[0] == "module":
+            return expected_entry[1] == actual_entry[1]
+        root = Path(working_directory) if working_directory is not None else Path.cwd()
+        try:
+            return (root / actual_entry[1]).resolve() == (root / expected_entry[1]).resolve()
+        except (OSError, ValueError) as exc:
+            raise CommandParseError("configured script identity cannot be resolved") from exc
     return False
 
 
