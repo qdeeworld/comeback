@@ -25,7 +25,7 @@ except ModuleNotFoundError:  # pragma: no cover - Python 3.10 only
 from .identity import BaseTrustConfig, repository_configuration
 from .installer import _is_comeback_handler
 from .memory import InterventionMemory, MemoryIntegrityError
-from .policy import invocation_matches
+from .policy import invokes_configured_argv
 from .signing import intervention_message
 
 
@@ -387,7 +387,30 @@ def _looks_like_auth_error(completed: subprocess.CompletedProcess[str]) -> bool:
     return any(marker in output for marker in markers)
 
 
-_GIT_READINESS_COMMAND = "git rev-parse --show-toplevel"
+def _git_probe_argv(root: Path) -> list[str]:
+    """Pin the read to installed Git, not a repository/PATH-provided shim."""
+    if os.name == "nt":
+        programs = Path(os.environ.get("ProgramFiles", "C:/Program Files"))
+        candidates = [programs / "Git/cmd/git.exe", programs / "Git/bin/git.exe"]
+    else:
+        candidates = [Path(path) for path in ("/usr/bin/git", "/opt/homebrew/bin/git", "/usr/local/bin/git")]
+    for candidate in candidates:
+        try:
+            path = candidate.resolve(strict=True)
+            if path.is_file() and not path.is_relative_to(root.resolve()):
+                return [str(path), "rev-parse", "--show-toplevel"]
+        except (OSError, ValueError, RuntimeError):
+            continue
+    raise DiagnosticFailure(
+        "TRUSTED_GIT_NOT_FOUND",
+        "No supported installed Git executable is available for the sandbox probe",
+        next_action="Install Git in its standard system location; do not substitute a repository script or PATH shim.",
+    )
+
+
+def _git_probe_command(root: Path) -> str:
+    argv = _git_probe_argv(root)
+    return subprocess.list2cmdline(argv) if os.name == "nt" else shlex.join(argv)
 
 
 def _trusted_probe_shell(executable: str, root: Path) -> bool:
@@ -424,7 +447,8 @@ def _trusted_probe_shell(executable: str, root: Path) -> bool:
 
 def _git_probe_command_matches(command: str, root: Path) -> bool:
     """Accept the exact read, including a native shell's literal wrapper."""
-    if invocation_matches(command, _GIT_READINESS_COMMAND, working_directory=root):
+    expected = _git_probe_argv(root)
+    if invokes_configured_argv(command, expected, working_directory=root):
         return True
     try:
         # These are literal diagnostic wrappers, not arbitrary shell programs.
@@ -464,12 +488,12 @@ def _git_probe_command_matches(command: str, root: Path) -> bool:
         # Do not normalize away chains, redirections, variable expansion or
         # trust overrides; only this literal read may establish readiness.
         payload = words[boundary + 1:]
-        return payload in (
-            [_GIT_READINESS_COMMAND], _GIT_READINESS_COMMAND.split()
+        return payload == expected or (
+            len(payload) == 1 and invokes_configured_argv(payload[0], expected, working_directory=root)
         )
     else:
         return False
-    return invocation_matches(words[-1], _GIT_READINESS_COMMAND, working_directory=root)
+    return invokes_configured_argv(words[-1], expected, working_directory=root)
 
 
 def _verify_codex_git_readiness(
@@ -507,7 +531,7 @@ def _verify_codex_git_readiness(
     proof: dict[str, Any] = {
         "sandbox": "workspace-write",
         "session_id": session_id,
-        "command": _GIT_READINESS_COMMAND,
+        "command": _git_probe_command(root),
         "proven": False,
         "trust_modified": None if unexpected_items else False,
         "completed_command_count": len(commands),
@@ -574,7 +598,9 @@ def _run_codex_activation_probe(
         environment["COMEBACK_MEMORY_DB"] = str(database)
         prompt = (
             f"Comeback activation canary {canary_id}. Run exactly one shell command: "
-            f"{_GIT_READINESS_COMMAND}. This is a read-only Git readiness check. "
+            f"{_git_probe_command(root)}. Use this exact absolute Git executable, not bare git. "
+            "In PowerShell, use its call operator & before the quoted executable. "
+            "This is a read-only Git readiness check. "
             "Do not change files, run other commands, add safe.directory exceptions, "
             "change Git configuration, request unsandboxed execution, or retry a failure. "
             "Report the actual result and stop."

@@ -158,7 +158,7 @@ def _client_response(argv: list[str]) -> subprocess.CompletedProcess[str] | None
 
 def _git_ready_stream(repo: Path, session_id: str, **overrides) -> str:
     item = {
-        "type": "command_execution", "command": "git rev-parse --show-toplevel",
+        "type": "command_execution", "command": diagnostics._git_probe_command(repo),
         "aggregated_output": str(repo.resolve()) + "\n", "exit_code": 0,
         "status": "completed", **overrides,
     }

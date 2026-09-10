@@ -11,12 +11,12 @@ from comeback import diagnostics
 from comeback.memory import InterventionMemory
 
 
-def _result(root: Path, *, command="git rev-parse --show-toplevel", output=None,
+def _result(root: Path, *, command=None, output=None,
             exit_code=0, session="fresh-git", status="completed"):
     events = [
         {"type": "thread.started", "thread_id": session},
         {"type": "item.completed", "item": {
-            "type": "command_execution", "command": command,
+            "type": "command_execution", "command": diagnostics._git_probe_command(root) if command is None else command,
             "aggregated_output": str(root.resolve()) if output is None else output,
             "exit_code": exit_code, "status": status,
         }},
@@ -43,6 +43,7 @@ def test_accepts_real_exact_git_result(monkeypatch, tmp_path, command):
     # Grammar coverage is cross-platform. Actual executable trust is exercised
     # separately below, including native shell lookup in each CI operating system.
     monkeypatch.setattr(diagnostics, "_trusted_probe_shell", lambda executable, root: True)
+    monkeypatch.setattr(diagnostics, "_git_probe_argv", lambda root: ["git", "rev-parse", "--show-toplevel"])
     proof = diagnostics._verify_codex_git_readiness(
         _result(tmp_path, command=command), root=tmp_path, session_id="fresh-git"
     )
@@ -69,6 +70,7 @@ def test_accepts_real_exact_git_result(monkeypatch, tmp_path, command):
 ])
 def test_rejects_unproven_or_modified_execution(monkeypatch, tmp_path, overrides):
     monkeypatch.setattr(diagnostics, "_trusted_probe_shell", lambda executable, root: True)
+    monkeypatch.setattr(diagnostics, "_git_probe_argv", lambda root: ["git", "rev-parse", "--show-toplevel"])
     with pytest.raises(diagnostics.DiagnosticFailure) as error:
         diagnostics._verify_codex_git_readiness(
             _result(tmp_path, **overrides), root=tmp_path, session_id="fresh-git"
@@ -124,9 +126,10 @@ def test_uncompleted_extra_command_prevents_readiness(tmp_path):
         diagnostics._verify_codex_git_readiness(result, root=tmp_path, session_id="fresh-git")
 
 
-def test_actual_native_shell_is_trusted(tmp_path):
+def test_actual_native_shell_is_trusted(monkeypatch, tmp_path):
     shell = str(Path(os.environ.get("SystemRoot", "C:/Windows")) / "System32/cmd.exe") if os.name == "nt" else "/bin/sh"
     assert diagnostics._trusted_probe_shell(shell, tmp_path)
+    monkeypatch.setattr(diagnostics, "_git_probe_argv", lambda root: ["git", "rev-parse", "--show-toplevel"])
     flag = "/c" if os.name == "nt" else "-c"
     command = f'"{shell}" {flag} "git rev-parse --show-toplevel"'
     assert diagnostics._verify_codex_git_readiness(
@@ -144,6 +147,45 @@ def test_repo_local_or_path_injected_shell_is_not_trusted(monkeypatch, tmp_path,
     other_repo = tmp_path / "separate-repo"
     other_repo.mkdir()
     assert not diagnostics._trusted_probe_shell(str(fake), other_repo)
+
+
+def test_path_git_shim_cannot_prove_readiness(monkeypatch, tmp_path):
+    shim = tmp_path / ("git.exe" if os.name == "nt" else "git")
+    shim.write_text("fake Git")
+    monkeypatch.setenv("PATH", str(tmp_path))
+    actual = diagnostics._git_probe_argv(tmp_path)
+    assert Path(actual[0]).is_absolute()
+    assert Path(actual[0]).is_file()
+    assert Path(actual[0]) != shim
+    for command in ("git rev-parse --show-toplevel", f'"{shim}" rev-parse --show-toplevel'):
+        with pytest.raises(diagnostics.DiagnosticFailure):
+            diagnostics._verify_codex_git_readiness(
+                _result(tmp_path, command=command), root=tmp_path, session_id="fresh-git"
+            )
+    assert diagnostics._verify_codex_git_readiness(
+        _result(tmp_path), root=tmp_path, session_id="fresh-git"
+    )["proven"]
+
+
+def test_missing_trusted_git_has_clear_refusal(monkeypatch, tmp_path):
+    monkeypatch.setattr(Path, "is_file", lambda path: False)
+    with pytest.raises(diagnostics.DiagnosticFailure) as error:
+        diagnostics._git_probe_argv(tmp_path)
+    assert error.value.code == "TRUSTED_GIT_NOT_FOUND"
+
+
+@pytest.mark.parametrize("command", [
+    '& "C:\\Program Files\\Git\\cmd\\git.exe" rev-parse --show-toplevel',
+    '"C:\\Program Files\\Git\\cmd\\git.exe" rev-parse --show-toplevel',
+    'cmd.exe /c "C:\\Program Files\\Git\\cmd\\git.exe" rev-parse --show-toplevel',
+    'powershell.exe -Command \'& "C:\\Program Files\\Git\\cmd\\git.exe" rev-parse --show-toplevel\'',
+])
+def test_pinned_windows_git_quoting(monkeypatch, tmp_path, command):
+    monkeypatch.setattr(diagnostics, "_trusted_probe_shell", lambda executable, root: True)
+    monkeypatch.setattr(diagnostics, "_git_probe_argv", lambda root: [
+        "C:\\Program Files\\Git\\cmd\\git.exe", "rev-parse", "--show-toplevel"
+    ])
+    assert diagnostics._git_probe_command_matches(command, tmp_path)
 
 
 def test_retry_after_ownership_failure_cannot_pass(tmp_path):
