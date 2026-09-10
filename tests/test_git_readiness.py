@@ -194,6 +194,43 @@ def test_windows_environment_cannot_redirect_trusted_installation(monkeypatch, t
     assert diagnostics._trusted_probe_shell(str(system / "cmd.exe"), repo)
 
 
+def test_probe_removes_ephemeral_git_overrides_without_mutating_parent(monkeypatch, tmp_path):
+    overrides = {
+        "GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "safe.directory",
+        "GIT_CONFIG_VALUE_0": "*", "GIT_DIR": str(tmp_path / "different.git"),
+        "GIT_WORK_TREE": str(tmp_path), "GIT_CONFIG_GLOBAL": str(tmp_path / "fake-config"),
+        "GIT_CONFIG_SYSTEM": str(tmp_path / "fake-system-config"),
+        "GIT_CONFIG_PARAMETERS": "'safe.directory=*'", "GIT_EXEC_PATH": str(tmp_path),
+        "GIT_INDEX_FILE": str(tmp_path / "fake-index"), "GIT_CEILING_DIRECTORIES": str(tmp_path),
+    }
+    for key, value in overrides.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setenv("COMEBACK_PROBE_UNRELATED", "preserved")
+    child = diagnostics._git_probe_environment(tmp_path / "memory.db")
+    assert not any(key.upper().startswith("GIT_") for key in child)
+    assert child["COMEBACK_PROBE_UNRELATED"] == "preserved"
+    assert child["COMEBACK_MEMORY_DB"] == str(tmp_path / "memory.db")
+    for key, value in overrides.items():
+        assert os.environ[key] == value
+
+
+def test_probe_uses_checkout_not_inherited_git_directory(monkeypatch, tmp_path):
+    repo = tmp_path / "repo"
+    other = tmp_path / "other"
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(["git", "init", "-q", str(other)], check=True)
+    monkeypatch.setenv("GIT_DIR", str(other / ".git"))
+    monkeypatch.setenv("GIT_WORK_TREE", str(other))
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+    monkeypatch.setenv("GIT_CONFIG_KEY_0", "safe.directory")
+    monkeypatch.setenv("GIT_CONFIG_VALUE_0", "*")
+    result = subprocess.run(diagnostics._git_probe_argv(repo), cwd=repo,
+                            env=diagnostics._git_probe_environment(tmp_path / "memory.db"),
+                            capture_output=True, text=True)
+    assert result.returncode == 0
+    assert Path(result.stdout.strip()).resolve() == repo.resolve()
+
+
 @pytest.mark.parametrize("command", [
     '& "C:\\Program Files\\Git\\cmd\\git.exe" rev-parse --show-toplevel',
     '"C:\\Program Files\\Git\\cmd\\git.exe" rev-parse --show-toplevel',
@@ -217,9 +254,13 @@ def test_retry_after_ownership_failure_cannot_pass(tmp_path):
 
 
 def test_activation_preserved_when_sandbox_git_fails(monkeypatch, tmp_path):
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+    monkeypatch.setenv("GIT_CONFIG_KEY_0", "safe.directory")
+    monkeypatch.setenv("GIT_CONFIG_VALUE_0", "*")
     def fake_run(argv, **kwargs):
         assert "--dangerously-bypass-hook-trust" not in argv
         assert argv[argv.index("--sandbox") + 1] == "workspace-write"
+        assert not any(key.upper().startswith("GIT_") for key in kwargs["env"])
         with InterventionMemory(Path(kwargs["env"]["COMEBACK_MEMORY_DB"]), "repo") as memory:
             memory.start_run(session_id="fresh-git", task_class="low_risk", area="general",
                              agent_family="Codex", model="test")

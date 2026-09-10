@@ -619,6 +619,16 @@ def _verify_codex_git_readiness(
     )
 
 
+def _git_probe_environment(database: Path) -> dict[str, str]:
+    # Preserve authentication and normal account configuration, but not
+    # ephemeral repository selection, executable helpers or config injection.
+    # Never mutate the operator's environment or persistent Git configuration.
+    environment = {key: value for key, value in os.environ.items()
+                   if not key.upper().startswith("GIT_")}
+    environment["COMEBACK_MEMORY_DB"] = str(database)
+    return environment
+
+
 def _run_codex_activation_probe(
     *, root: Path, repo_id: str, executable: str
 ) -> dict[str, Any]:
@@ -627,8 +637,7 @@ def _run_codex_activation_probe(
     canary_id = uuid.uuid4().hex
     with tempfile.TemporaryDirectory(prefix="comeback-codex-canary-") as directory:
         database = Path(directory) / "memory.db"
-        environment = os.environ.copy()
-        environment["COMEBACK_MEMORY_DB"] = str(database)
+        environment = _git_probe_environment(database)
         prompt = (
             f"Comeback activation canary {canary_id}. Run exactly one shell command: "
             f"{_git_probe_command(root)}. Use this exact absolute Git executable, not bare git. "
