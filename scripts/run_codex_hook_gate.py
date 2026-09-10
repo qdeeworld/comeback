@@ -248,6 +248,9 @@ def run_gate() -> dict[str, Any]:
                 f"expected one real UserPromptSubmit run, observed {len(canary_runs)}",
             )
         canary_run = canary_runs[0]
+        hook_observed_before_side_effect = bool(canary_run.get("session_id")) and not marker.exists()
+        if not hook_observed_before_side_effect:
+            raise GateFailure("activation_canary", "canary unexpectedly created a release side effect")
 
         owner = Account.create()
         # Session one is a real Codex process, not a seeded fixture. With no
@@ -271,7 +274,8 @@ def run_gate() -> dict[str, Any]:
             for run in _new_runs(memory, before_source)
             if run.get("task_class") == "release"
         ]
-        if len(source_runs) != 1 or not marker.exists():
+        source_side_effect_created = marker.exists()
+        if len(source_runs) != 1 or not source_side_effect_created:
             raise GateFailure(
                 "real_source_session",
                 "the first real Codex session did not execute the disposable release",
@@ -304,6 +308,14 @@ def run_gate() -> dict[str, Any]:
             owner,
             source_run["session_id"],
         )
+        source_lessons = memory.matching_lessons("release", "release_workflow", "Codex")
+        intervention_uses_exact_session = (
+            len(source_lessons) == 1
+            and source_lessons[0].get("source_session_id") == source_run["session_id"]
+            and source_session == source_run["session_id"]
+        )
+        if not intervention_uses_exact_session:
+            raise GateFailure("record_intervention", "stored intervention is not bound to the real source session")
 
         before_block = _run_ids(memory)
         blocked_process = _run_codex(
@@ -341,7 +353,8 @@ def run_gate() -> dict[str, Any]:
             for event in pretool_decisions
             if event.get("acted", {}).get("decision") == "deny"
         ]
-        if marker.exists():
+        blocked_side_effect_absent = not marker.exists()
+        if not blocked_side_effect_absent:
             raise GateFailure("fresh_session_block", "release side effect exists")
         if blocked_run["mode"] != "HUMAN_REQUIRED":
             raise GateFailure("fresh_session_block", "fresh session missed remembered mode")
@@ -368,6 +381,15 @@ def run_gate() -> dict[str, Any]:
                 "fresh_session_block",
                 "Codex output did not expose the Comeback denial",
             )
+        tool_denied = (
+            len(pretool_denials) == 1
+            and pretool_denials[0].get("acted", {}).get("decision") == "deny"
+            and pretool_denials[0].get("evaluated", {}).get("session_id") == blocked_run["session_id"]
+            and pretool_denials[0].get("evaluated", {}).get("command_sha256") == expected_command_sha256
+            and denial_visible
+        )
+        if not tool_denied:
+            raise GateFailure("fresh_session_block", "denial evidence belongs to a different session")
 
         setup_run = _complete_human_required_run(memory, root, owner)
         marker.unlink(missing_ok=True)
@@ -396,7 +418,8 @@ def run_gate() -> dict[str, Any]:
                 f"observed task classes: {[run.get('task_class') for run in _new_runs(memory, before_full_loop)]}",
             )
         completed_run = memory.get_run(full_runs[0]["session_id"])
-        if full_process.returncode != 0 or not marker.exists():
+        final_side_effect_created = marker.exists()
+        if full_process.returncode != 0 or not final_side_effect_created:
             combined_output = (full_process.stdout + "\n" + full_process.stderr)[-6000:]
             raise GateFailure(
                 "fresh_session_capability_loop",
@@ -430,25 +453,25 @@ def run_gate() -> dict[str, Any]:
                 "codex_exit_code": source_process.returncode,
                 "pretool_event_id": source_allows[0]["id"],
                 "command_sha256": source_allows[0]["evaluated"]["command_sha256"],
-                "release_side_effect_created": True,
-                "intervention_uses_exact_session": True,
+                "release_side_effect_created": source_side_effect_created,
+                "intervention_uses_exact_session": intervention_uses_exact_session,
             },
             "activation_canary": {
                 "session_id": canary_run["session_id"],
                 "process_id": canary_run.get("process_id"),
-                "hook_observed_before_side_effect": True,
+                "hook_observed_before_side_effect": hook_observed_before_side_effect,
             },
             "fresh_session_block": {
                 "session_id": blocked_run["session_id"],
                 "process_id": blocked_run.get("process_id"),
                 "mode": blocked_run["mode"],
-                "tool_denied": True,
+                "tool_denied": tool_denied,
                 "pretool_event_id": pretool_denials[0]["id"],
                 "command_sha256": pretool_denials[0]["evaluated"][
                     "command_sha256"
                 ],
                 "denial_visible": denial_visible,
-                "release_side_effect_absent": True,
+                "release_side_effect_absent": blocked_side_effect_absent,
             },
             "capability_setup": {
                 "session_id": setup_run["session_id"],
@@ -461,7 +484,7 @@ def run_gate() -> dict[str, Any]:
                 "mode": completed_run["mode"],
                 "checkpoint_receipt": completed_run["checkpoint_receipt"]["digest"],
                 "release_outcome": completed_run["outcome"],
-                "release_side_effect_created": True,
+                "release_side_effect_created": final_side_effect_created,
             },
         }
 

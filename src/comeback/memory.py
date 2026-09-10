@@ -104,7 +104,11 @@ def _strings(value: Any, field: str) -> list[str]:
 
 
 def _argv(value: Any, field: str) -> list[str]:
-    values = _strings(value, field)
+    # argv is an ordered sequence, not a set. Repeated flags and values are
+    # legitimate and must remain byte-for-byte part of the signed command.
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        raise MemoryIntegrityError(f"{field} must be a string list")
+    values = list(value)
     if not values or any(not item for item in values):
         raise MemoryIntegrityError(f"{field} must contain at least one non-empty argument")
     return values

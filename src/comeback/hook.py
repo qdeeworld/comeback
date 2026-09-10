@@ -11,11 +11,12 @@ from .identity import repository_configuration
 from .launcher import launcher_argv
 from .memory import InterventionMemory, MemoryIntegrityError
 from .policy import (
+    CommandParseError,
     WORKFLOW_AREAS,
     classify_task,
     comeback_capability_action,
     command_from_event,
-    invokes_configured_argv,
+    detects_configured_argv,
     is_release_action,
     is_release_capability,
 )
@@ -39,9 +40,13 @@ def _database(root: Path, event: dict[str, Any]) -> Path:
 
 def _agent_family(event: dict[str, Any]) -> str:
     override = event.get("_comeback_agent_family")
-    if isinstance(override, str) and override:
-        return override
-    return os.environ.get("COMEBACK_AGENT_FAMILY", "Codex")
+    family = (
+        override if isinstance(override, str) and override
+        else os.environ.get("COMEBACK_AGENT_FAMILY", "Codex")
+    )
+    if family not in {"Codex", "ClaudeCode"}:
+        raise MemoryIntegrityError("installed hook agent family is unsupported")
+    return family
 
 
 def _powershell_quote(value: str) -> str:
@@ -144,6 +149,19 @@ def _pretool_result(
     }
 
 
+def _verify_run_principal(
+    run: dict[str, Any], event: dict[str, Any], memory: InterventionMemory
+) -> None:
+    # A self-consistent stored run must not choose a different principal to
+    # escape same-agent lessons. The reviewed launcher supplies this identity.
+    if run.get("repo_id") != memory.repo_id:
+        raise MemoryIntegrityError("supervision run belongs to another repository")
+    if run.get("agent_family") != _agent_family(event):
+        raise MemoryIntegrityError("supervision run agent differs from the installed hook")
+    if run.get("session_id") != event.get("session_id"):
+        raise MemoryIntegrityError("supervision run belongs to another session")
+
+
 def _handle_event(
     event: dict[str, Any],
     *,
@@ -152,11 +170,14 @@ def _handle_event(
 ) -> dict[str, Any] | None:
     """Process one lifecycle event using an already-owned memory handle."""
 
-    session_id = str(event.get("session_id", ""))
+    session_id = event.get("session_id")
     event_name = event.get("hook_event_name")
 
-    if not session_id:
+    if not isinstance(session_id, str) or not session_id.strip():
         raise MemoryIntegrityError("hook event has no session identity")
+
+    if event_name == "PreToolUse" and event.get("tool_name") == "Bash" and not command_from_event(event).strip():
+        return _deny("Comeback fail-closed: Bash hook input has no non-empty command.")
 
     if event_name == "UserPromptSubmit":
         prompt = str(event.get("prompt", ""))
@@ -169,6 +190,7 @@ def _handle_event(
             model=str(event.get("model", "unknown")),
             process_id=os.getpid(),
         )
+        _verify_run_principal(run, event, memory)
         return {
             "hookSpecificOutput": {
                 "hookEventName": "UserPromptSubmit",
@@ -189,26 +211,34 @@ def _handle_event(
         expected_release,
         working_directory=root,
     )
-    comeback_action = comeback_capability_action(event)
     configured_raw_action = False
     configured_areas: set[str] = set()
     preliminary_run: dict[str, Any] | None = None
-    if event_name == "PreToolUse":
-        try:
-            preliminary_run = memory.get_run(session_id)
-        except MemoryIntegrityError:
-            preliminary_run = None
-        configured_areas = {
-            area for area, release_argv in memory.configured_workflow_actions(_agent_family(event))
-            if invokes_configured_argv(
-                release_command,
-                release_argv,
-                working_directory=root,
-            )
-        }
-        configured_raw_action = bool(configured_areas)
+    try:
+        comeback_action = comeback_capability_action(event)
+        release_action = is_release_action(event)
+        if event_name == "PreToolUse":
+            try:
+                preliminary_run = memory.get_run(session_id)
+            except MemoryIntegrityError:
+                preliminary_run = None
+            if preliminary_run is not None:
+                _verify_run_principal(preliminary_run, event, memory)
+            configured_areas = {
+                area for area, release_argv in memory.configured_workflow_actions(_agent_family(event))
+                if detects_configured_argv(
+                    release_command,
+                    release_argv,
+                    working_directory=root,
+                )
+            }
+            configured_raw_action = bool(configured_areas)
+    except (CommandParseError, MemoryIntegrityError) as exc:
+        if event_name == "PreToolUse":
+            return _deny(f"Comeback fail-closed: {exc}. Use a direct, unambiguous command.")
+        raise
     if event_name == "PreToolUse" and (
-        is_release_action(event)
+        release_action
         or exact_checkpoint
         or exact_release
         or comeback_action is not None
@@ -244,6 +274,7 @@ def _handle_event(
             )
         try:
             run = memory.get_verified_run(session_id)
+            _verify_run_principal(run, event, memory)
         except MemoryIntegrityError as exc:
             return _pretool_result(
                 memory,
@@ -340,16 +371,26 @@ def _handle_event(
             event,
             action_kind=action_kind,
             decision="allow",
-            reason=f"Comeback {run['mode']}: release gate satisfied.",
+            reason=(
+                f"Comeback {run['mode']}: signed release capability requirements satisfied."
+                if run["lesson_ids"]
+                else "Comeback AUTONOMOUS: no remembered intervention applies to this action."
+            ),
         )
 
     if event_name == "Stop":
         try:
             run = memory.get_run(session_id)
+            _verify_run_principal(run, event, memory)
         except MemoryIntegrityError as exc:
-            if "no Sibyl supervision run exists" in str(exc):
-                return None
-            return _block_stop(f"Comeback fail-closed: {exc}", event)
+            # Absence is not evidence that this session never needed
+            # supervision: the run could have been deleted or recall never
+            # activated. A fresh initialized low-risk run still stops normally.
+            return _block_stop(
+                f"Comeback fail-closed: {exc}. Start a genuinely fresh session; "
+                "if recall does not activate, run comeback doctor before continuing.",
+                event,
+            )
         if run["status"] in {"completed", "failed"}:
             return None
         if run["status"] in {"executing", "unknown"}:
@@ -362,6 +403,7 @@ def _handle_event(
             )
         try:
             run = memory.get_verified_run(session_id)
+            _verify_run_principal(run, event, memory)
         except MemoryIntegrityError as exc:
             return _block_stop(f"Comeback fail-closed: {exc}", event)
         if (
@@ -395,7 +437,17 @@ def handle(event: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def main() -> None:
+    event = None
     try:
+        # Read the lifecycle before parsing launcher options, so a damaged
+        # installed command cannot erase the event's blocking response shape.
+        event = json.load(sys.stdin)
+        if not isinstance(event, dict):
+            raise MemoryIntegrityError("hook input must be an object")
+        if event.get("hook_event_name") not in {
+            "PreToolUse", "UserPromptSubmit", "Stop", "PostToolUse"
+        }:
+            raise MemoryIntegrityError("hook input has no supported lifecycle event")
         agent_family = None
         cli_executable = None
         arguments = list(sys.argv[1:])
@@ -412,9 +464,6 @@ def main() -> None:
                 agent_family = value
             else:
                 cli_executable = value
-        event = json.load(sys.stdin)
-        if not isinstance(event, dict):
-            raise MemoryIntegrityError("hook input must be an object")
         # Lifecycle JSON is untrusted. Only command-line values installed in
         # the reviewed hook launcher may populate private Comeback fields.
         event.pop("_comeback_agent_family", None)
@@ -428,7 +477,7 @@ def main() -> None:
         if output is not None:
             print(json.dumps(output, sort_keys=True))
     except Exception as exc:
-        event_name = locals().get("event", {}).get("hook_event_name") if isinstance(locals().get("event"), dict) else None
+        event_name = event.get("hook_event_name") if isinstance(event, dict) else None
         if event_name == "PreToolUse":
             print(json.dumps(_deny(f"Comeback fail-closed: {exc}"), sort_keys=True))
             return
@@ -440,7 +489,14 @@ def main() -> None:
                 )
             )
             return
-        print(json.dumps({"systemMessage": f"Comeback hook error: {exc}"}, sort_keys=True))
+        if event_name == "UserPromptSubmit":
+            print(json.dumps({"decision": "block", "reason": f"Comeback fail-closed: {exc}"}, sort_keys=True))
+            return
+        # Both supported harnesses use exit 2 to block a command hook when no
+        # valid event-specific JSON can be produced. Never silently exit 0 on
+        # unreadable input or emit a non-blocking informational message instead.
+        print(f"Comeback fail-closed: {exc}", file=sys.stderr)
+        raise SystemExit(2)
 
 
 if __name__ == "__main__":

@@ -408,7 +408,12 @@ def test_approved_capability_survives_restart_and_children_receive_filtered_path
         assert final["approval"]["signature"] == signature
 
 
-@pytest.mark.parametrize("change", ["path", "token", "git_config"])
+@pytest.mark.parametrize("change", [
+    "path", "token", "git_config", "LD_LIBRARY_PATH", "DYLD_LIBRARY_PATH",
+    "PYTHONUSERBASE", "JAVA_TOOL_OPTIONS", "DOTNET_STARTUP_HOOKS",
+    "JDK_JAVA_OPTIONS", "_JAVA_OPTIONS", "CLASSPATH", "DOTNET_ADDITIONAL_DEPS",
+    "DOTNET_SHARED_STORE", "PYTHONSTARTUP", "DYLD_FALLBACK_LIBRARY_PATH",
+])
 def test_real_execution_context_change_still_invalidates_approval(
     tmp_path: Path, monkeypatch, change: str
 ):
@@ -425,8 +430,12 @@ def test_real_execution_context_change_still_invalidates_approval(
             monkeypatch.setenv("PATH", str(tmp_path / "ordinary") + os.pathsep + os.environ["PATH"])
         elif change == "token":
             monkeypatch.setenv("COMEBACK_TEST_TOKEN", "different-test-value")
-        else:
+        elif change == "git_config":
             subprocess.run(["git", "-C", str(tmp_path), "config", "example.changed", "true"], check=True)
+        else:
+            # Only change this after the checkpoint. The release must refuse
+            # before launching a child with any altered loader/runtime input.
+            monkeypatch.setenv(change, "comeback-test-changed-context")
         with pytest.raises(MemoryIntegrityError, match="state changed after the approved checkpoint"):
             execute_release(memory, session_id="fresh", root=tmp_path)
         assert not (tmp_path / "released.txt").exists()

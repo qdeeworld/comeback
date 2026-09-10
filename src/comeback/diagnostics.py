@@ -23,7 +23,13 @@ except ModuleNotFoundError:  # pragma: no cover - Python 3.10 only
     import tomli as tomllib
 
 from .identity import BaseTrustConfig, repository_configuration
-from .installer import _is_comeback_handler
+from .installer import (
+    _is_comeback_handler,
+    claude_hook_groups,
+    cli_executable_for_hook,
+    hook_groups,
+    resolve_hook_executable,
+)
 from .memory import InterventionMemory, MemoryIntegrityError
 from .policy import invokes_configured_argv
 from .signing import intervention_message
@@ -71,13 +77,12 @@ def _comeback_handlers(path: Path, *, agent: str) -> dict[str, dict[str, Any]]:
         )
     found: dict[str, dict[str, Any]] = {}
     for event_name in ("UserPromptSubmit", "PreToolUse", "Stop"):
+        matches: list[dict[str, Any]] = []
         groups = configured.get(event_name)
         if not isinstance(groups, list):
             groups = []
         for group in groups:
             if not isinstance(group, dict):
-                continue
-            if event_name == "PreToolUse" and group.get("matcher") != "Bash":
                 continue
             handlers = group.get("hooks")
             if not isinstance(handlers, list):
@@ -87,20 +92,31 @@ def _comeback_handlers(path: Path, *, agent: str) -> dict[str, dict[str, Any]]:
                     continue
                 if not _is_comeback_handler(handler):
                     continue
-                if agent == "codex" and os.name == "nt" and not isinstance(
-                    handler.get("commandWindows"), str
+                if (
+                    handler.get("type") != "command"
+                    or not isinstance(handler.get("command"), str)
+                    or (agent == "codex" and not isinstance(handler.get("commandWindows"), str))
+                    or (event_name == "PreToolUse" and group.get("matcher") != "Bash")
                 ):
-                    continue
-                found[event_name] = handler
-                break
-            if event_name in found:
-                break
-        if event_name not in found:
+                    raise DiagnosticFailure(
+                        "HOOK_CONFIG_INVALID",
+                        f"Comeback {event_name} hook has an unsupported definition in {path}",
+                        next_action="Run `comeback init`, review the updated hooks, then rerun the doctor.",
+                    )
+                matches.append(handler)
+        if not matches:
             raise DiagnosticFailure(
                 "HOOK_CONFIG_MISSING",
                 f"Comeback {event_name} hook is missing from {path}",
                 next_action="Run `comeback init`, review every written hook, then rerun `comeback doctor`.",
             )
+        if len(matches) != 1:
+            raise DiagnosticFailure(
+                "HOOK_CONFIG_INVALID",
+                f"Comeback {event_name} has duplicate handlers in {path}",
+                next_action="Run `comeback init`, review the updated hooks, then rerun the doctor.",
+            )
+        found[event_name] = matches[0]
     command_signatures = {
         (
             handler.get("command"),
@@ -117,25 +133,36 @@ def _comeback_handlers(path: Path, *, agent: str) -> dict[str, dict[str, Any]]:
     return found
 
 
-def _capability_executable(handler: dict[str, Any]) -> str:
-    command = handler.get("command")
-    if not isinstance(command, str):
-        raise DiagnosticFailure(
-            "CAPABILITY_COMMAND_MISSING",
-            "Comeback hook does not identify its trusted capability executable",
-            next_action="Run `comeback init`, review the updated hooks, then rerun the doctor.",
-        )
+def _capability_executable(handler: dict[str, Any], *, agent: str) -> str:
+    """Bind a probe to this installation, not a path supplied by hook config.
+
+    The generated shell spelling is deliberately exact. Parsing out a plausible
+    --cli-executable does not make the rest of an agent-writable command safe to
+    execute in the operator's doctor process. This remains a local trust check,
+    not protection against replacing the installation or the process environment.
+    """
     try:
-        words = shlex.split(command, posix=True)
-        option = words.index("--cli-executable")
-        executable = words[option + 1]
-    except (ValueError, IndexError) as exc:
+        hook = resolve_hook_executable(allow_path_fallback=False)
+        groups = hook_groups(hook) if agent == "codex" else claude_hook_groups(hook)
+        expected = groups["UserPromptSubmit"][0]["hooks"][0]
+    except (OSError, RuntimeError) as exc:
         raise DiagnosticFailure(
-            "CAPABILITY_COMMAND_MISSING",
-            "Comeback hook does not identify its trusted capability executable",
-            next_action="Run `comeback init`, review the updated hooks, then rerun the doctor.",
+            "CAPABILITY_EXECUTABLE_MISSING",
+            "Cannot resolve the current Comeback installation's launcher",
+            next_action="Reinstall Comeback, run `comeback init`, review the hooks, then rerun the doctor.",
         ) from exc
-    path = Path(executable)
+    if (
+        handler.get("type") != "command"
+        or handler.get("command") != expected["command"]
+        or (agent == "codex" and handler.get("commandWindows") != expected["commandWindows"])
+        or handler.get("async", False) is not False
+    ):
+        raise DiagnosticFailure(
+            "HOOK_LAUNCHER_UNTRUSTED",
+            "Comeback hook differs from the current installation's canonical launcher; nothing was executed",
+            next_action="Run `comeback init` from the intended installation, review all updated hooks, then rerun the doctor.",
+        )
+    path = cli_executable_for_hook(hook)
     if (
         not path.is_absolute()
         or not path.is_file()
@@ -143,7 +170,7 @@ def _capability_executable(handler: dict[str, Any]) -> str:
     ):
         raise DiagnosticFailure(
             "CAPABILITY_EXECUTABLE_MISSING",
-            f"trusted Comeback capability executable was not found: {executable}",
+            f"trusted Comeback capability executable was not found: {path}",
             next_action="Reinstall Comeback with uv, rerun `comeback init`, then rerun the doctor.",
         )
     return str(path)
@@ -200,6 +227,7 @@ def _invoke_installed_hook(
 ) -> dict[str, Any]:
     """Probe the Claude launcher only; Codex uses a real client process below."""
 
+    _capability_executable(handler, agent=agent)
     event = {
         "session_id": session_id,
         "cwd": str(root),
@@ -1190,7 +1218,11 @@ def diagnose_repository(
             )
             handlers = _comeback_handlers(config_path, agent=agent)
             handler = handlers["UserPromptSubmit"]
-            capability_executable = _capability_executable(handler)
+            capability_executable = _capability_executable(handler, agent=agent)
+            # Validate every lifecycle handler before starting a client: a
+            # matching command with different execution flags is not equivalent.
+            for lifecycle_handler in handlers.values():
+                _capability_executable(lifecycle_handler, agent=agent)
             client = _client_check(agent, root)
             if agent == "codex":
                 intervention_records = (

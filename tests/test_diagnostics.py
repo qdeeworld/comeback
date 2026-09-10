@@ -16,7 +16,7 @@ from comeback.memory import InterventionMemory
 from comeback.signing import intervention_message
 
 
-def _write_hook(repo: Path) -> None:
+def _write_hook(repo: Path, monkeypatch) -> None:
     tools = repo.parent / "tools"
     tools.mkdir(exist_ok=True)
     hook = tools / ("comeback-hook.exe" if os.name == "nt" else "comeback-hook")
@@ -28,6 +28,7 @@ def _write_hook(repo: Path) -> None:
     if os.name != "nt":
         hook.chmod(0o755)
         capability.chmod(0o755)
+    monkeypatch.setattr(diagnostics, "resolve_hook_executable", lambda **_kwargs: hook)
     path = repo / ".codex" / "hooks.json"
     path.parent.mkdir(parents=True)
     path.write_text(
@@ -173,7 +174,7 @@ def test_codex_doctor_proves_real_fresh_process_without_trust_bypass(
 ) -> None:
     repo = tmp_path / "repo"
     repo.mkdir()
-    _write_hook(repo)
+    _write_hook(repo, monkeypatch)
     _trust_repo(monkeypatch, tmp_path, repo)
     monkeypatch.setattr(
         diagnostics,
@@ -252,7 +253,7 @@ def test_codex_doctor_reports_untrusted_project_without_claiming_activation(
 ) -> None:
     repo = tmp_path / "repo"
     repo.mkdir()
-    _write_hook(repo)
+    _write_hook(repo, monkeypatch)
     codex_home = tmp_path / "codex-home"
     codex_home.mkdir()
     (codex_home / "config.toml").write_text("", encoding="utf-8")
@@ -281,7 +282,7 @@ def test_codex_doctor_reports_untrusted_project_without_claiming_activation(
 def test_codex_doctor_reports_hook_hash_not_activated(monkeypatch, tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     repo.mkdir()
-    _write_hook(repo)
+    _write_hook(repo, monkeypatch)
     _trust_repo(monkeypatch, tmp_path, repo)
     monkeypatch.setattr(
         diagnostics,
@@ -309,7 +310,7 @@ def test_codex_doctor_reports_hook_hash_not_activated(monkeypatch, tmp_path: Pat
 def test_codex_doctor_reports_authentication_failure(monkeypatch, tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     repo.mkdir()
-    _write_hook(repo)
+    _write_hook(repo, monkeypatch)
     _trust_repo(monkeypatch, tmp_path, repo)
     monkeypatch.setattr(
         diagnostics,
@@ -339,7 +340,7 @@ def test_base_active_doctor_replays_only_verified_sibyl_intervention(
 ) -> None:
     repo = tmp_path / "repo"
     repo.mkdir()
-    _write_hook(repo)
+    _write_hook(repo, monkeypatch)
     _trust_repo(monkeypatch, tmp_path, repo)
     owner = Account.create()
     record = _signed_intervention(owner)
@@ -446,7 +447,7 @@ def test_claimed_base_without_intervention_reports_pending_before_agent_probe(
 ) -> None:
     repo = tmp_path / "repo"
     repo.mkdir()
-    _write_hook(repo)
+    _write_hook(repo, monkeypatch)
     _trust_repo(monkeypatch, tmp_path, repo)
     owner = Account.create()
     base_trust = _base_config(owner.address, status="claimed")
@@ -507,7 +508,7 @@ def test_active_base_without_anchored_memory_fails_closed(
 ) -> None:
     repo = tmp_path / "repo"
     repo.mkdir()
-    _write_hook(repo)
+    _write_hook(repo, monkeypatch)
     _trust_repo(monkeypatch, tmp_path, repo)
     owner = Account.create()
     base_trust = _base_config(

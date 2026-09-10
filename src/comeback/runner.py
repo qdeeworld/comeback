@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import subprocess
@@ -16,6 +17,85 @@ _ATOMIC_WRITE_FLAGS = (
 )
 
 
+def _scratch_path(path: Path, nonce: str, purpose: str) -> Path:
+    """Bound auxiliary names without changing the authoritative lock identity."""
+
+    digest = hashlib.sha256(
+        (path.name + "\0" + nonce + "\0" + purpose).encode("utf-8")
+    ).hexdigest()[:32]
+    # Barrier names stay as short as a UUID-based checkpoint name; staging
+    # names must not add another suffix or repeat the parent's nonce.
+    if purpose in {"ready", "start"}:
+        return path.with_name(f"{digest}.{purpose}")
+    return path.with_name(f".{digest}.tmp")
+
+
+def _cleanup_scratch(path: Path) -> None:
+    """Best-effort auxiliary cleanup must never change an execution outcome.
+
+    Call only for files owned by this attempt, never an authoritative lock.
+    Files are created with mode 0600 and nonce-scoped names; leftovers cannot
+    authorize a later attempt. This is not OS-level isolation from the same
+    user. Do not retry the command or hide a publication failure to remove it.
+    """
+
+    try:
+        path.unlink(missing_ok=True)
+    except OSError as exc:
+        try:
+            print(
+                "Comeback scratch cleanup deferred "
+                f"({type(exc).__name__}, errno={exc.errno}, "
+                f"winerror={getattr(exc, 'winerror', None)}).",
+                file=sys.stderr,
+            )
+        except (OSError, ValueError):
+            pass  # A closed diagnostic stream must not mask the real result.
+
+
+def _read_control_bytes(path: Path, *, limit: int = 4096) -> bytes:
+    """Read a bounded control record, preserving native Windows error codes."""
+
+    if os.name != "nt":
+        with path.open("rb") as stream:
+            payload = stream.read(limit + 1)
+        if len(payload) > limit:
+            raise ValueError("control record exceeds size limit")
+        return payload
+
+    # CRT-backed open can replace native sharing errors with generic EACCES.
+    # Share deletion so readers can coexist with atomic file publication.
+    import ctypes
+    from ctypes import wintypes
+
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.CreateFileW.argtypes = [
+        wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p,
+        wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE,
+    ]
+    kernel.CreateFileW.restype = wintypes.HANDLE
+    kernel.ReadFile.argtypes = [
+        wintypes.HANDLE, ctypes.c_void_p, wintypes.DWORD,
+        ctypes.POINTER(wintypes.DWORD), ctypes.c_void_p,
+    ]
+    kernel.ReadFile.restype = wintypes.BOOL
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel.CloseHandle.restype = wintypes.BOOL
+    handle = kernel.CreateFileW(str(path), 0x80000000, 1 | 2 | 4, None, 3, 0x80, None)
+    if handle == ctypes.c_void_p(-1).value:
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        buffer = ctypes.create_string_buffer(limit + 1)
+        count = wintypes.DWORD()
+        if not kernel.ReadFile(handle, buffer, len(buffer), ctypes.byref(count), None):
+            raise ctypes.WinError(ctypes.get_last_error())
+        if count.value > limit:
+            raise ValueError("control record exceeds size limit")
+        return buffer.raw[:count.value]
+    finally:
+        kernel.CloseHandle(handle)
+
+
 def _write_all(descriptor: int, payload: bytes) -> None:
     offset = 0
     while offset < len(payload):
@@ -29,7 +109,7 @@ def _write_all(descriptor: int, payload: bytes) -> None:
 
 
 def _write_ready(path: Path) -> None:
-    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary = _scratch_path(path, "", "ready-tmp")
     descriptor = os.open(temporary, _ATOMIC_WRITE_FLAGS, 0o600)
     try:
         try:
@@ -42,7 +122,7 @@ def _write_ready(path: Path) -> None:
             os.close(descriptor)
         os.replace(temporary, path)
     finally:
-        temporary.unlink(missing_ok=True)
+        _cleanup_scratch(temporary)
 
 
 def _windows_containment_job():
@@ -200,20 +280,42 @@ def run(
     _write_ready(ready)
     deadline = time.monotonic() + wait_seconds
     expected_start = (token + "\n").encode("utf-8")
-    while True:
+    last_read_error: str | None = None
+    start_authorized = False
+    while time.monotonic() < deadline:
         try:
-            start_value = start.read_bytes()
+            start_value = _read_control_bytes(start)
         except FileNotFoundError:
             start_value = None
         except OSError as exc:
-            raise RuntimeError("start barrier is unreadable") from exc
+            detail = (
+                f"{type(exc).__name__}, errno={exc.errno}, "
+                f"winerror={getattr(exc, 'winerror', None)}"
+            )
+            if getattr(exc, "winerror", None) not in {32, 33}:
+                raise RuntimeError(f"start barrier is unreadable ({detail})") from exc
+            # Retry only this read within the original deadline. The target
+            # does not exist yet. Invalid tokens and access denials never retry.
+            last_read_error = detail
+            start_value = None
+        except ValueError as exc:
+            raise RuntimeError("start barrier record exceeds size limit") from exc
         if start_value is not None:
+            # A read can finish after the original deadline even if it began
+            # in time. A late valid token must not authorize target execution.
+            if time.monotonic() >= deadline:
+                break
             if start_value != expected_start:
                 raise RuntimeError("start barrier token is invalid")
+            start_authorized = True
             break
-        if time.monotonic() >= deadline:
-            return 125
         time.sleep(0.02)
+    if not start_authorized:
+        if last_read_error is not None:
+            raise RuntimeError(
+                f"start barrier read timed out ({last_read_error})"
+            )
+        return 125
     if os.name != "nt":
         os.execvpe(command[0], command, os.environ.copy())
         raise AssertionError("exec returned")  # pragma: no cover

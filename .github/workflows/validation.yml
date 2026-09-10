@@ -45,7 +45,11 @@ jobs:
         os: [ubuntu-latest, windows-latest]
         python: ["3.12", "3.13"]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 10
+    # The Windows job intentionally executes the complete suite twice (directly
+    # and through release_check.py), followed by replay and shell-launcher gates.
+    # Both suites can exceed the former combined 10-minute cap as coverage grows.
+    # Keep every check and the repeat run; increase only the scheduling budget.
+    timeout-minutes: 25
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
