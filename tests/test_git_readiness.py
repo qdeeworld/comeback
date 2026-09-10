@@ -39,7 +39,10 @@ def _result(root: Path, *, command="git rev-parse --show-toplevel", output=None,
     '"C:\\Windows\\System32\\cmd.exe" /C "git rev-parse --show-toplevel"',
     'cmd.exe /k git rev-parse --show-toplevel',
 ])
-def test_accepts_real_exact_git_result(tmp_path, command):
+def test_accepts_real_exact_git_result(monkeypatch, tmp_path, command):
+    # Grammar coverage is cross-platform. Actual executable trust is exercised
+    # separately below, including native shell lookup in each CI operating system.
+    monkeypatch.setattr(diagnostics, "_trusted_probe_shell", lambda executable, root: True)
     proof = diagnostics._verify_codex_git_readiness(
         _result(tmp_path, command=command), root=tmp_path, session_id="fresh-git"
     )
@@ -64,7 +67,8 @@ def test_accepts_real_exact_git_result(tmp_path, command):
     {"status": "failed"}, {"output": ""}, {"output": "relative/repo"},
     {"output": "/a/different/repository"}, {"session": "old-session"},
 ])
-def test_rejects_unproven_or_modified_execution(tmp_path, overrides):
+def test_rejects_unproven_or_modified_execution(monkeypatch, tmp_path, overrides):
+    monkeypatch.setattr(diagnostics, "_trusted_probe_shell", lambda executable, root: True)
     with pytest.raises(diagnostics.DiagnosticFailure) as error:
         diagnostics._verify_codex_git_readiness(
             _result(tmp_path, **overrides), root=tmp_path, session_id="fresh-git"
@@ -81,12 +85,65 @@ def test_model_claim_without_tool_result_is_not_proof(tmp_path):
 
 
 def test_nonfatal_skill_budget_advisory_does_not_override_real_git_success(tmp_path):
-    result = _result(tmp_path, command="/bin/zsh -lc 'git rev-parse --show-toplevel'")
+    result = _result(tmp_path)
     result.stdout += "\n" + json.dumps({"type": "item.completed", "item": {
         "type": "error", "message": "Skill descriptions were shortened to fit the skills context budget."
     }})
     proof = diagnostics._verify_codex_git_readiness(result, root=tmp_path, session_id="fresh-git")
     assert proof["proven"] is True
+
+
+def test_usage_numbers_and_session_ids_are_not_authentication_errors(tmp_path):
+    result = _result(tmp_path, session="fresh-401-session")
+    result.stdout += "\n" + json.dumps({"type": "turn.completed", "usage": {
+        "input_tokens": 40401, "cached_input_tokens": 401, "output_tokens": 95
+    }})
+    assert not diagnostics._looks_like_auth_error(result)
+
+
+@pytest.mark.parametrize("message", ["401 Unauthorized", "authentication failed", "invalid api key"])
+def test_real_authentication_errors_remain_recognized(message):
+    assert diagnostics._looks_like_auth_error(subprocess.CompletedProcess([], 1, "", message))
+
+
+@pytest.mark.parametrize("kind", ["file_change", "mcp_tool_call", "web_search", "future_tool"])
+@pytest.mark.parametrize("event_type", ["item.started", "item.updated", "item.completed"])
+def test_other_tools_prevent_readiness(tmp_path, kind, event_type):
+    result = _result(tmp_path)
+    result.stdout += "\n" + json.dumps({"type": event_type, "item": {"type": kind}})
+    with pytest.raises(diagnostics.DiagnosticFailure):
+        diagnostics._verify_codex_git_readiness(result, root=tmp_path, session_id="fresh-git")
+
+
+def test_uncompleted_extra_command_prevents_readiness(tmp_path):
+    result = _result(tmp_path)
+    result.stdout += "\n" + json.dumps({"type": "item.started", "item": {
+        "type": "command_execution", "command": "git config --global safe.directory '*'"
+    }})
+    with pytest.raises(diagnostics.DiagnosticFailure):
+        diagnostics._verify_codex_git_readiness(result, root=tmp_path, session_id="fresh-git")
+
+
+def test_actual_native_shell_is_trusted(tmp_path):
+    shell = str(Path(os.environ.get("SystemRoot", "C:/Windows")) / "System32/cmd.exe") if os.name == "nt" else "/bin/sh"
+    assert diagnostics._trusted_probe_shell(shell, tmp_path)
+    flag = "/c" if os.name == "nt" else "-c"
+    command = f'"{shell}" {flag} "git rev-parse --show-toplevel"'
+    assert diagnostics._verify_codex_git_readiness(
+        _result(tmp_path, command=command), root=tmp_path, session_id="fresh-git"
+    )["proven"]
+
+
+@pytest.mark.parametrize("name", ["bash", "cmd.exe", "powershell.exe"])
+def test_repo_local_or_path_injected_shell_is_not_trusted(monkeypatch, tmp_path, name):
+    fake = tmp_path / name
+    fake.write_text("not a trusted shell")
+    monkeypatch.setattr(diagnostics.shutil, "which", lambda executable: str(fake))
+    for executable in (str(fake), f"./{name}", name):
+        assert not diagnostics._trusted_probe_shell(executable, tmp_path)
+    other_repo = tmp_path / "separate-repo"
+    other_repo.mkdir()
+    assert not diagnostics._trusted_probe_shell(str(fake), other_repo)
 
 
 def test_retry_after_ownership_failure_cannot_pass(tmp_path):

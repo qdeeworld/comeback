@@ -381,7 +381,6 @@ def _looks_like_auth_error(completed: subprocess.CompletedProcess[str]) -> bool:
         "authentication required",
         "authentication failed",
         "unauthorized",
-        "401",
         "missing api key",
         "invalid api key",
     )
@@ -389,6 +388,38 @@ def _looks_like_auth_error(completed: subprocess.CompletedProcess[str]) -> bool:
 
 
 _GIT_READINESS_COMMAND = "git rev-parse --show-toplevel"
+
+
+def _trusted_probe_shell(executable: str, root: Path) -> bool:
+    """Only installed platform shells, never repo-local or arbitrary PATH tools."""
+    path = Path(executable)
+    if not path.is_absolute():
+        if "/" in executable or "\\" in executable:
+            return False
+        found = shutil.which(executable)
+        if not found:
+            return False
+        path = Path(found)
+    try:
+        path = path.resolve(strict=True)
+        if path.is_relative_to(root.resolve()) or not path.is_file():
+            return False
+        if os.name == "nt":
+            windows = Path(os.environ.get("SystemRoot", "C:/Windows"))
+            programs = Path(os.environ.get("ProgramFiles", "C:/Program Files"))
+            allowed = [
+                windows / "System32/cmd.exe",
+                windows / "System32/WindowsPowerShell/v1.0/powershell.exe",
+                programs / "PowerShell/7/pwsh.exe",
+                programs / "Git/bin/bash.exe",
+                programs / "Git/usr/bin/bash.exe",
+            ]
+        else:
+            allowed = [Path(directory) / name for directory in ("/bin", "/usr/bin")
+                       for name in ("sh", "bash", "zsh")]
+        return any(candidate.is_file() and path == candidate.resolve() for candidate in allowed)
+    except (OSError, ValueError, RuntimeError):
+        return False
 
 
 def _git_probe_command_matches(command: str, root: Path) -> bool:
@@ -407,6 +438,8 @@ def _git_probe_command_matches(command: str, root: Path) -> bool:
     except ValueError:
         return False
     if len(words) < 3:
+        return False
+    if not _trusted_probe_shell(words[0], root):
         return False
     shell = words[0].replace("\\", "/").rsplit("/", 1)[-1].lower()
     if shell in {"sh", "bash", "zsh"}:
@@ -445,6 +478,7 @@ def _verify_codex_git_readiness(
     """Use actual tool results, never a model's claim that Git worked."""
     threads: list[str] = []
     commands: list[dict[str, Any]] = []
+    unexpected_items: list[str] = []
     for line in completed.stdout.splitlines():
         try:
             event = json.loads(line)
@@ -454,18 +488,31 @@ def _verify_codex_git_readiness(
             continue
         if event.get("type") == "thread.started":
             threads.append(event.get("thread_id"))
-        if event.get("type") == "item.completed":
+        if event.get("type") in {"item.started", "item.updated", "item.completed"}:
             item = event.get("item")
-            if isinstance(item, dict) and item.get("type") == "command_execution":
-                commands.append(item)
+            if not isinstance(item, dict):
+                unexpected_items.append("malformed_item")
+                continue
+            kind = item.get("type")
+            if kind == "command_execution":
+                if event.get("type") == "item.completed":
+                    commands.append(item)
+                command = item.get("command")
+                if not isinstance(command, str) or not _git_probe_command_matches(command, root):
+                    unexpected_items.append("unexpected_command")
+            elif kind not in {"agent_message", "reasoning", "todo_list", "error"}:
+                # File edits, MCP tools, searches, and future unknown tools must
+                # not silently disappear from a supposedly read-only proof.
+                unexpected_items.append(str(kind))
     proof: dict[str, Any] = {
         "sandbox": "workspace-write",
         "session_id": session_id,
         "command": _GIT_READINESS_COMMAND,
         "proven": False,
-        "trust_modified": False,
+        "trust_modified": None if unexpected_items else False,
         "completed_command_count": len(commands),
         "session_matches": threads == [session_id],
+        "unexpected_items": unexpected_items,
     }
     recovery = (
         "Do not create an owner or sign a correction yet. Verify read-only Git access "
@@ -473,9 +520,15 @@ def _verify_codex_git_readiness(
         "Review repository ownership and sandbox setup with the owner or administrator. "
         "Do not use safe.directory=* or disable the sandbox. See README: Windows Git ownership."
     )
+    if unexpected_items:
+        recovery = (
+            "The canary used an unexpected tool or command; inspect the checkout and Git "
+            "configuration for changes before continuing. No automatic rollback was attempted. "
+            + recovery
+        )
     # Codex also emits nonfatal startup advisories as item.type=error. Those
     # are not command failures; require the actual command's status/exit below.
-    if len(commands) == 1 and threads == [session_id]:
+    if not unexpected_items and len(commands) == 1 and threads == [session_id]:
         item = commands[0]
         command = item.get("command")
         output = item.get("aggregated_output")
