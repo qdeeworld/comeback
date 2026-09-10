@@ -304,6 +304,135 @@ def test_cross_platform_checkpoint_and_release_capabilities(tmp_path: Path):
         _assert_checkpoint_and_release(tmp_path, memory, owner)
 
 
+def test_capability_environment_removes_only_reserved_shim_entries(tmp_path: Path, monkeypatch):
+    codex_root = tmp_path / "Codex With Spaces"
+    monkeypatch.setenv("CODEX_HOME", str(codex_root))
+    shim = str(codex_root / "tmp" / "arg0" / "codex-arg0first")
+    default_shim = str(Path.home() / ".codex" / "tmp" / "arg0" / "codex-arg0outer")
+    unrelated = str(tmp_path / "ordinary" / "codex-arg0first")
+    sibling = str(codex_root / "tmp" / "arg0" / "ordinary")
+    nested = str(Path(shim) / "bin")
+    retained = [unrelated, "", ".", sibling, nested]
+    inherited = os.pathsep.join([shim, *retained, default_shim])
+    monkeypatch.setenv("PATH", inherited)
+    monkeypatch.setenv("COMEBACK_TEST_TOKEN", "test-not-a-secret")
+    environment = execution_module._capability_environment()
+    assert environment["PATH"] == os.pathsep.join(retained)
+    assert environment["COMEBACK_TEST_TOKEN"] == "test-not-a-secret"
+    assert os.environ["PATH"] == inherited
+
+
+def test_shim_only_path_fails_instead_of_enabling_cwd_search(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+    monkeypatch.setenv("PATH", str(tmp_path / "tmp" / "arg0" / "codex-arg0only"))
+    with pytest.raises(MemoryIntegrityError, match="no capability PATH entries"):
+        execution_module._capability_environment()
+
+
+def test_removed_shim_cannot_shadow_capability_executable(tmp_path: Path, monkeypatch):
+    codex_root = tmp_path / "codex"
+    shim = codex_root / "tmp" / "arg0" / "codex-arg0one"
+    ordinary = tmp_path / "ordinary"
+    shim.mkdir(parents=True)
+    ordinary.mkdir()
+    name = "check.exe" if os.name == "nt" else "check"
+    for directory in (shim, ordinary):
+        executable = directory / name
+        executable.write_bytes(b"fixture")
+        executable.chmod(0o755)
+    monkeypatch.setenv("CODEX_HOME", str(codex_root))
+    monkeypatch.setenv("PATH", os.pathsep.join([str(shim), str(ordinary)]))
+    assert _resolved_executable(tmp_path, name) == ordinary / name
+    # An explicit signed file is not silently rewritten or exempted from hashing.
+    assert _resolved_executable(tmp_path, str(shim / name)) == shim / name
+
+
+def test_approved_capability_survives_restart_and_children_receive_filtered_path(
+    tmp_path: Path, monkeypatch
+):
+    codex_root = tmp_path / ".comeback" / "codex with spaces"
+    shim_a = codex_root / "tmp" / "arg0" / "codex-arg0first"
+    shim_b = codex_root / "tmp" / "arg0" / "codex-arg0second"
+    assertion = (
+        "import os; from pathlib import Path; "
+        "assert not any(Path(p).name.startswith('codex-arg0') "
+        "for p in os.environ['PATH'].split(os.pathsep)); "
+    )
+    memory, owner = _supervised_memory(
+        tmp_path,
+        checkpoint_argv=[sys.executable, "-c", assertion + "print('checked')"],
+        release_argv=[sys.executable, "-c", assertion + "Path('released.txt').write_text('ok')"],
+    )
+    shim_a.mkdir(parents=True)
+    shim_b.mkdir(parents=True)
+    # This would break Git inspection if the temporary entry remained executable.
+    fake_git = shim_b / ("git.exe" if os.name == "nt" else "git")
+    fake_git.write_bytes(b"not a valid git executable")
+    fake_git.chmod(0o755)
+    monkeypatch.setenv("CODEX_HOME", str(codex_root))
+    original_path = os.environ["PATH"]
+
+    def in_fresh_process(operation, shim):
+        environment = dict(os.environ, PATH=os.pathsep.join([str(shim), original_path]))
+        script = (
+            "import json, sys; from pathlib import Path; "
+            "from comeback.memory import InterventionMemory; "
+            "from comeback.execution import execute_checkpoint, execute_release; "
+            "root=Path(sys.argv[1]); "
+            "memory=InterventionMemory(root/'.comeback'/'memory.db', 'repo-a'); "
+            f"result, code=execute_{operation}(memory, session_id='fresh', root=root); "
+            "memory.close(); print(json.dumps(result)); sys.exit(code)"
+        )
+        return subprocess.run(
+            [sys.executable, "-c", script, str(tmp_path)], cwd=tmp_path,
+            env=environment, capture_output=True, text=True, timeout=60,
+        )
+
+    with memory:
+        checkpoint = in_fresh_process("checkpoint", shim_a)
+        assert checkpoint.returncode == 0, checkpoint.stderr
+        assert json.loads(checkpoint.stdout)["remaining"] == ["human_approval"]
+        run = memory.get_run("fresh")
+        digest = run["checkpoint_receipt"]["digest"]
+        approved_at = datetime.now(timezone.utc).isoformat()
+        signature = Account.sign_message(
+            encode_defunct(text=approval_message(run, approved_at)), private_key=owner.key
+        ).signature.hex()
+        memory.approve("fresh", approved_at=approved_at, signature=signature)
+        release = in_fresh_process("release", shim_b)
+        assert release.returncode == 0, release.stderr
+        assert json.loads(release.stdout)["outcome"] == "success"
+        assert (tmp_path / "released.txt").read_text() == "ok"
+        final = memory.get_run("fresh")
+        assert final["checkpoint_receipt"]["digest"] == digest
+        assert final["approval"]["signature"] == signature
+
+
+@pytest.mark.parametrize("change", ["path", "token", "git_config"])
+def test_real_execution_context_change_still_invalidates_approval(
+    tmp_path: Path, monkeypatch, change: str
+):
+    memory, owner = _supervised_memory(tmp_path)
+    with memory:
+        execute_checkpoint(memory, session_id="fresh", root=tmp_path)
+        run = memory.get_run("fresh")
+        approved_at = datetime.now(timezone.utc).isoformat()
+        signature = Account.sign_message(
+            encode_defunct(text=approval_message(run, approved_at)), private_key=owner.key
+        ).signature.hex()
+        memory.approve("fresh", approved_at=approved_at, signature=signature)
+        if change == "path":
+            monkeypatch.setenv("PATH", str(tmp_path / "ordinary") + os.pathsep + os.environ["PATH"])
+        elif change == "token":
+            monkeypatch.setenv("COMEBACK_TEST_TOKEN", "different-test-value")
+        else:
+            subprocess.run(["git", "-C", str(tmp_path), "config", "example.changed", "true"], check=True)
+        with pytest.raises(MemoryIntegrityError, match="state changed after the approved checkpoint"):
+            execute_release(memory, session_id="fresh", root=tmp_path)
+        assert not (tmp_path / "released.txt").exists()
+        assert memory.get_run("fresh")["status"] == "open"
+
+
 def _assert_checkpoint_and_release(tmp_path: Path, memory, owner):
     checkpoint, checkpoint_exit = execute_checkpoint(
         memory, session_id="fresh", root=tmp_path
