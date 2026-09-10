@@ -25,6 +25,41 @@ _ATOMIC_WRITE_FLAGS = (
 )
 
 
+def _capability_environment() -> dict[str, str]:
+    """Exclude per-launch Codex shims from both execution and its fingerprint.
+
+    Codex adds a new tmp/arg0/codex-arg0* PATH entry on each CLI start. It is
+    tooling for the agent, not an input to a signed repository capability.
+    Merely ignoring it in the hash would permit unchecked command shadowing:
+    remove it from the environment actually inherited by commands as well.
+    Keep every other PATH entry, its order, and all other environment values.
+    Never mutate the caller's environment (capabilities may run concurrently).
+    """
+    environment = dict(os.environ)
+    codex_roots = [Path.home() / ".codex"]
+    if configured := environment.get("CODEX_HOME"):
+        codex_roots.append(Path(configured).expanduser())
+    shim_parents = {
+        os.path.normcase(os.path.abspath(root / "tmp" / "arg0"))
+        for root in codex_roots
+    }
+    if "PATH" in environment:
+        retained = []
+        for entry in environment["PATH"].split(os.pathsep):
+            directory = Path(entry)
+            is_shim = (
+                directory.is_absolute()
+                and directory.name.startswith("codex-arg0")
+                and os.path.normcase(os.path.abspath(directory.parent)) in shim_parents
+            )
+            if not is_shim:
+                retained.append(entry)
+        if not retained:
+            raise MemoryIntegrityError("no capability PATH entries remain after excluding Codex shims")
+        environment["PATH"] = os.pathsep.join(retained)
+    return environment
+
+
 def _result(completed: subprocess.CompletedProcess[str], run: dict[str, Any]) -> dict[str, Any]:
     return {
         "session_id": run["session_id"],
@@ -38,8 +73,9 @@ def _result(completed: subprocess.CompletedProcess[str], run: dict[str, Any]) ->
 def _git(root: Path, *arguments: str) -> bytes:
     try:
         completed = subprocess.run(
-            ["git", *arguments],
+            [str(_resolved_executable(root, "git")), *arguments],
             cwd=root,
+            env=_capability_environment(),
             capture_output=True,
             timeout=60,
             check=False,
@@ -57,8 +93,9 @@ def _git(root: Path, *arguments: str) -> bytes:
 
 def _git_branch(root: Path) -> str:
     completed = subprocess.run(
-        ["git", "symbolic-ref", "--quiet", "--short", "HEAD"],
+        [str(_resolved_executable(root, "git")), "symbolic-ref", "--quiet", "--short", "HEAD"],
         cwd=root,
+        env=_capability_environment(),
         capture_output=True,
         text=True,
         timeout=30,
@@ -97,7 +134,7 @@ def _resolved_executable(root: Path, executable_text: str) -> Path:
         # relative/empty PATH entry is deliberately rooted in the repository,
         # then the selected absolute file is both fingerprinted and executed.
         bases = []
-        for entry in os.get_exec_path():
+        for entry in os.get_exec_path(_capability_environment()):
             directory = Path(entry or ".").expanduser()
             if not directory.is_absolute():
                 directory = root / directory
@@ -161,7 +198,7 @@ def _action_context(root: Path, spec: dict[str, Any]) -> dict[str, Any]:
 
     sensitive_environment = {
         key: value
-        for key, value in os.environ.items()
+        for key, value in _capability_environment().items()
         if key in {
             "PATH",
             "PATHEXT",
@@ -184,6 +221,7 @@ def _action_context(root: Path, spec: dict[str, Any]) -> dict[str, Any]:
         or key.endswith(("_TOKEN", "_SECRET", "_API_KEY"))
     }
     return {
+        "environment_policy": "capability-path-v1",
         "executable": _file_identity(executable),
         "argument_files": sorted(argument_files, key=lambda item: item["path"]),
         "environment_sha256": hashlib.sha256(
@@ -1025,6 +1063,7 @@ def _run_contained_command(
         process = subprocess.Popen(
             runner_command,
             cwd=root,
+            env=_capability_environment(),
             shell=False,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -1233,6 +1272,7 @@ def execute_release(
         process = subprocess.Popen(
             runner_command,
             cwd=root,
+            env=_capability_environment(),
             shell=False,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
