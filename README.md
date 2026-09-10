@@ -4,6 +4,14 @@
 
 Comeback remembers where a coding agent needed human intervention, then changes how much autonomy the next agent receives for a comparable, configured repository release.
 
+## Demo
+
+[Watch Comeback — Corrections That Survive the Chat | Sibyl + Base Demo](https://youtu.be/jgZ2JFGiydE) (2 minutes 38 seconds).
+
+Recorded runtime: [`3db9acc9efdd159d881fe903f9a354b6d99281c7`](https://github.com/qdeeworld/comeback/tree/3db9acc9efdd159d881fe903f9a354b6d99281c7). The demonstration uses a prepared disposable repository and local Git destination, not a production deployment. It shows a code-review correction surviving a fresh Codex session, a mandatory check, owner approval, and later verification without repeat approval.
+
+The separate Base Sepolia segment invokes `start_run` and `get_verified_run` on isolated memory backups, performing live contract reads through the same verifier used before managed capability execution. Missing anchored initial memory makes verification refuse. This segment does not execute a checkpoint or release, submit a new transaction, or alter the original memory store. Base anchors the selected owner and initial signed intervention; Sibyl retains adaptive history. See [the Base integration and its limits](#optional-base-sepolia-owner-anchor).
+
 This repository is a bounded Sibyl hackathon validation spike, not a production security product. Its one implemented task class is repository release work:
 
 1. A developer records a signed intervention after an agent skips a required release check.
