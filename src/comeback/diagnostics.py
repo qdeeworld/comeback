@@ -396,7 +396,14 @@ def _git_probe_command_matches(command: str, root: Path) -> bool:
     if invocation_matches(command, _GIT_READINESS_COMMAND, working_directory=root):
         return True
     try:
-        words = shlex.split(command)
+        # These are literal diagnostic wrappers, not arbitrary shell programs.
+        # In particular, an unquoted Windows executable path keeps backslashes;
+        # POSIX shlex defaults would silently consume them as escape characters.
+        lexer = shlex.shlex(command, posix=True)
+        lexer.whitespace_split = True
+        lexer.commenters = ""
+        lexer.escape = ""
+        words = list(lexer)
     except ValueError:
         return False
     if len(words) < 3:
@@ -411,6 +418,22 @@ def _git_probe_command_matches(command: str, root: Path) -> bool:
             for flag in words[1:-2]
         ):
             return False
+    elif shell in {"cmd", "cmd.exe"}:
+        switches = [word.lower() for word in words[1:]]
+        boundary = next((index + 1 for index, word in enumerate(switches)
+                         if word in {"/c", "/k"}), None)
+        if boundary is None or any(
+            flag.lower() not in {"/d", "/s", "/q"}
+            for flag in words[1:boundary]
+        ):
+            return False
+        # cmd accepts either a single quoted payload or bare command words.
+        # Do not normalize away chains, redirections, variable expansion or
+        # trust overrides; only this literal read may establish readiness.
+        payload = words[boundary + 1:]
+        return payload in (
+            [_GIT_READINESS_COMMAND], _GIT_READINESS_COMMAND.split()
+        )
     else:
         return False
     return invocation_matches(words[-1], _GIT_READINESS_COMMAND, working_directory=root)
