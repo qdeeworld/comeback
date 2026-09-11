@@ -391,8 +391,6 @@ def _handle_event(
                 "if recall does not activate, run comeback doctor before continuing.",
                 event,
             )
-        if run["status"] in {"completed", "failed"}:
-            return None
         if run["status"] in {"executing", "unknown"}:
             return _block_stop(
                 (
@@ -401,11 +399,15 @@ def _handle_event(
                 ),
                 event,
             )
+        # The run row is unsigned: a closed status ends supervision only after
+        # the verified read corroborates that closure.
         try:
             run = memory.get_verified_run(session_id)
             _verify_run_principal(run, event, memory)
         except MemoryIntegrityError as exc:
             return _block_stop(f"Comeback fail-closed: {exc}", event)
+        if run["status"] in {"completed", "failed"}:
+            return None
         if (
             run["status"] == "open"
             and run["lesson_ids"]
