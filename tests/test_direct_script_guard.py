@@ -46,6 +46,18 @@ def test_known_script_direct_execution_is_refusal_only(tmp_path, command, argv):
     assert not invokes_configured_argv(command, argv, working_directory=tmp_path)
 
 
+@pytest.mark.parametrize("script", ["cd", "bash", "env", "python", "node", "command", "builtin", "eval", "exec", "sh", "pwsh", "pushd"])
+def test_explicit_script_identity_precedes_builtin_dispatch(tmp_path, script):
+    memory, _ = _supervised_memory(tmp_path, release_argv=["python", script])
+    try:
+        command = "./" + script
+        assert detects_configured_argv(command, ["python", script], working_directory=tmp_path)
+        output = _handle_event(_event(memory, command), root=tmp_path, memory=memory)
+        assert output["hookSpecificOutput"]["permissionDecision"] == "deny"
+    finally:
+        memory.close()
+
+
 @pytest.mark.parametrize("command,argv", [
     ("cat X", ["python", "X"]),
     ("echo X", ["python", "X"]),
@@ -84,6 +96,7 @@ def test_directory_changes_cannot_hide_a_known_script(tmp_path, command):
 @pytest.mark.parametrize("command", [
     "cd scripts && cat X", "cd scripts && ./Y", "cd scripts && {other_absolute}",
     "command -v cd; ./X", "command -V cd; ./X",
+    "./cd scripts; ./X", "./eval 'cd scripts'; ./X",
 ])
 def test_directory_uncertainty_does_not_match_unrelated_actions(tmp_path, command):
     command = command.format(other_absolute=shlex.quote(str(tmp_path / "unrelated" / "X")))
@@ -122,6 +135,7 @@ def test_native_windows_direct_paths_reach_hook_denial(tmp_path, command, script
 @pytest.mark.parametrize("command,script", [
     ("./X --yes", "X"), ("cd scripts && ./X --yes", "scripts/X"),
     ("command cd scripts && ./X --yes", "scripts/X"),
+    ("./cd", "cd"),
 ])
 def test_real_direct_script_stops_before_side_effect(tmp_path, command, script):
     memory, _ = _supervised_memory(tmp_path, release_argv=["python", script])

@@ -660,10 +660,16 @@ def _interpreter_entrypoint(executable: str, arguments: list[str]) -> tuple[str,
     return None
 
 
+def _explicit_script_path(word: str) -> bool:
+    return "/" in word or "\\" in word or (os.name == "nt" and bool(Path(word).drive))
+
+
 def _segment_changes_directory(words: list[str]) -> bool:
     index = _command_index(words)
     if index >= len(words):
         return False
+    if _explicit_script_path(words[index]):
+        return False  # An external ./cd is not the current shell's cd builtin.
     executable = _executable_name(words[index])
     if executable in {"cd", "chdir", "pushd", "popd", "set-location", "sl", "eval", "iex", "invoke-expression"}:
         return True
@@ -679,13 +685,6 @@ def _segments_invoke_configured(
         index = _command_index(segment)
         if index >= len(segment):
             continue
-        executable = _executable_name(segment[index])
-        if executable in {"cd", "chdir", "pushd", "popd", "set-location", "sl"}:
-            # Do not simulate shell directory stacks, conditional success or
-            # variable expansion. A later same-named relative script is unsafe
-            # to classify as unrelated when its resolution base has changed.
-            directory_uncertain = True
-            continue
         if _segment_invokes_configured(
             segment, argv, working_directory,
             directory_uncertain=directory_uncertain,
@@ -693,6 +692,8 @@ def _segments_invoke_configured(
         ):
             return True
         if _segment_changes_directory(segment):
+            # Do not simulate shell directory stacks, conditional success or
+            # expansion. Later same-named relative scripts are uncertain.
             directory_uncertain = True
     return False
 
@@ -725,6 +726,19 @@ def _segment_invokes_configured(
         return False
     words = words[index:]
     executable = _executable_name(words[0])
+    expected = _executable_name(argv[0])
+    # Explicit configured script identity wins over basename-based dispatch.
+    # ./cd, ./bash and ./python may be scripts, not builtins/interpreters.
+    if _interpreter_family(expected) and _explicit_script_path(words[0]):
+        try:
+            entry = _interpreter_entrypoint(expected, argv[1:])
+        except CommandParseError:
+            entry = None
+        if entry is not None and entry[0] == "script" and _configured_script_path_matches(
+            words[0], entry[1], working_directory,
+            directory_uncertain=directory_uncertain,
+        ):
+            return True
     wrapper = _wrapper_tail(executable, words[1:])
     if wrapper is not None:
         directory_options = {
@@ -754,26 +768,8 @@ def _segment_invokes_configured(
             argv, working_directory, directory_uncertain=directory_uncertain,
             preserve_backslashes=preserve_backslashes,
         )
-    expected = _executable_name(argv[0])
     family = _interpreter_family(executable)
     if executable != expected and not (family and family == _interpreter_family(expected)):
-        # A known interpreter script may also be executable through its shebang.
-        # Recognize the same explicit path for refusal, without reading scripts,
-        # resolving arbitrary PATH aliases, or widening capability authorization.
-        explicit_path = (
-            "/" in words[0] or "\\" in words[0]
-            or (os.name == "nt" and bool(Path(words[0]).drive))
-        )
-        if _interpreter_family(expected) and explicit_path:
-            try:
-                entry = _interpreter_entrypoint(expected, argv[1:])
-            except CommandParseError:
-                entry = None  # An unknown signed option does not identify a script.
-            if entry is not None and entry[0] == "script":
-                return _configured_script_path_matches(
-                    words[0], entry[1], working_directory,
-                    directory_uncertain=directory_uncertain,
-                )
         return False
     # Added arguments cannot turn a known entry point into an unprotected one.
     # This broadens refusal only, not the exact one-shot authorization grammar.
