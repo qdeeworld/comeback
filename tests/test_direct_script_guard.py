@@ -82,6 +82,10 @@ def test_direct_script_refusal_does_not_guess_other_programs(tmp_path, command, 
     "command -- cd scripts && ./X", "command command cd scripts && ./X",
     "builtin cd scripts && ./X", "command eval 'cd scripts'; ./X",
     "command eval 'cd scripts; ./X'",
+    "Push-Location scripts; ./X", "Pop-Location; ./X",
+    "push-location -LiteralPath scripts; ./X", "pop-location -StackName prior; ./X",
+    "pwsh -Command 'Push-Location scripts; ./X'",
+    "powershell -Command 'Pop-Location; ./X'",
 ])
 def test_directory_changes_cannot_hide_a_known_script(tmp_path, command):
     memory, _ = _supervised_memory(tmp_path, release_argv=["python", "scripts/X"])
@@ -119,6 +123,10 @@ def test_refusal_tokenizer_can_preserve_windows_backslashes():
     (r"cd scripts && .\x", "scripts/X"),
     ("& {drive}X", "X"), ("{drive}X --yes", "X"),
     ("cd scripts; & {drive}X", "scripts/X"),
+    (r"Push-Location scripts; .\X", "scripts/X"),
+    (r"Pop-Location; .\X", "scripts/X"),
+    (r"pwsh -Command 'Push-Location scripts; .\X'", "scripts/X"),
+    (r"powershell -Command 'Pop-Location; .\X'", "scripts/X"),
 ])
 def test_native_windows_direct_paths_reach_hook_denial(tmp_path, command, script):
     memory, _ = _supervised_memory(tmp_path, release_argv=["python", script])

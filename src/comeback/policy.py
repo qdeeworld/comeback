@@ -671,7 +671,10 @@ def _segment_changes_directory(words: list[str]) -> bool:
     if _explicit_script_path(words[index]):
         return False  # An external ./cd is not the current shell's cd builtin.
     executable = _executable_name(words[index])
-    if executable in {"cd", "chdir", "pushd", "popd", "set-location", "sl", "eval", "iex", "invoke-expression"}:
+    if executable in {
+        "cd", "chdir", "pushd", "popd", "push-location", "pop-location",
+        "set-location", "sl", "eval", "iex", "invoke-expression",
+    }:
         return True
     wrapper = _wrapper_tail(executable, words[index + 1:])
     return wrapper is not None and _segment_changes_directory(wrapper)
