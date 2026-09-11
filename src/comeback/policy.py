@@ -668,6 +668,13 @@ def _segment_changes_directory(words: list[str]) -> bool:
     index = _command_index(words)
     if index >= len(words):
         return False
+    # PowerShell module qualification is not an executable filesystem path.
+    # Limit this exception to the known management module's location cmdlets.
+    qualified = words[index].casefold().split("\\")
+    if len(qualified) == 2 and qualified[0] == "microsoft.powershell.management" and qualified[1] in {
+        "set-location", "push-location", "pop-location",
+    }:
+        return True
     if _explicit_script_path(words[index]):
         return False  # An external ./cd is not the current shell's cd builtin.
     executable = _executable_name(words[index])
