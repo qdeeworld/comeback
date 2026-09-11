@@ -9,13 +9,13 @@ from pathlib import Path
 import pytest
 
 from comeback.hook import _handle_event, capability_invocation
-from comeback.policy import detects_configured_argv, invocation_matches, invokes_configured_argv
+from comeback.policy import _shell_words, detects_configured_argv, invocation_matches, invokes_configured_argv
 from test_execution import _supervised_memory
 from test_hook_fail_closed import _event
 
 
 @pytest.mark.parametrize("agent_family", ["Codex", "ClaudeCode"])
-@pytest.mark.parametrize("command", ["X --yes", "./X --yes", "{absolute} --yes", "env -u FOO ./X", "bash -c './X --yes'"])
+@pytest.mark.parametrize("command", ["./X --yes", "{absolute} --yes", "env -u FOO ./X", "bash -c './X --yes'"])
 def test_same_configured_script_direct_execution_is_denied(tmp_path, command, agent_family):
     memory, _ = _supervised_memory(tmp_path, release_argv=["python", "X"])
     try:
@@ -54,19 +54,71 @@ def test_known_script_direct_execution_is_refusal_only(tmp_path, command, argv):
     ("./X", ["python", "-m", "X"]),
     ("./X", ["python", "-c", "X"]),
     ("./X", ["python", "--unknown", "X"]),
+    ("X --yes", ["python", "X"]),
 ])
 def test_direct_script_refusal_does_not_guess_other_programs(tmp_path, command, argv):
     assert not detects_configured_argv(command, argv, working_directory=tmp_path)
 
 
-@pytest.mark.skipif(os.name == "nt" or shutil.which("sh") is None, reason="POSIX shebang side-effect reproduction")
-def test_real_direct_script_stops_before_side_effect(tmp_path):
-    memory, _ = _supervised_memory(tmp_path, release_argv=["python", "X"])
+@pytest.mark.parametrize("command", [
+    "cd scripts && ./X", "cd scripts; ./X", "pushd scripts && ./X",
+    "bash -c 'cd scripts && ./X'", "env -C scripts ./X",
+    "env --chdir=scripts ./X", "sudo -D scripts ./X",
+    "cd scripts && python X",
+    "eval 'cd scripts'; ./X", "env -Cscripts ./X",
+])
+def test_directory_changes_cannot_hide_a_known_script(tmp_path, command):
+    memory, _ = _supervised_memory(tmp_path, release_argv=["python", "scripts/X"])
     try:
-        executable = tmp_path / "X"
-        executable.write_text("#!/usr/bin/env python3\nfrom pathlib import Path\nPath('released.txt').write_text('local fixture')\n", encoding="utf-8")
+        assert detects_configured_argv(command, ["python", "scripts/X"], working_directory=tmp_path)
+        output = _handle_event(_event(memory, command), root=tmp_path, memory=memory)
+        assert output["hookSpecificOutput"]["permissionDecision"] == "deny"
+    finally:
+        memory.close()
+
+
+@pytest.mark.parametrize("command", ["cd scripts && cat X", "cd scripts && ./Y", "cd scripts && {other_absolute}"])
+def test_directory_uncertainty_does_not_match_unrelated_actions(tmp_path, command):
+    command = command.format(other_absolute=shlex.quote(str(tmp_path / "unrelated" / "X")))
+    assert not detects_configured_argv(command, ["python", "scripts/X"], working_directory=tmp_path)
+
+
+def test_refusal_tokenizer_can_preserve_windows_backslashes():
+    assert _shell_words(r".\X --yes", preserve_backslashes=True) == [r".\X", "--yes"]
+    assert _shell_words(r"C:\repo\X --yes", preserve_backslashes=True) == [r"C:\repo\X", "--yes"]
+    # Default parsing stays unchanged for actual POSIX escape handling.
+    assert _shell_words(r".\X --yes") == [".X", "--yes"]
+
+
+@pytest.mark.skipif(os.name != "nt", reason="native Windows path resolution")
+@pytest.mark.parametrize("command,script", [
+    (r".\X --yes", "X"), (r"& .\X --yes", "X"),
+    ("{absolute} --yes", "X"), (r"cd scripts && .\X", "scripts/X"),
+    (r"Set-Location scripts; .\X", "scripts/X"),
+    (r"pwsh -Command 'cd scripts; .\X'", "scripts/X"),
+    (r"cd scripts && .\x", "scripts/X"),
+])
+def test_native_windows_direct_paths_reach_hook_denial(tmp_path, command, script):
+    memory, _ = _supervised_memory(tmp_path, release_argv=["python", script])
+    try:
+        command = command.format(absolute=str(tmp_path / "X"))
+        assert detects_configured_argv(command, ["python", script], working_directory=tmp_path)
+        output = _handle_event(_event(memory, command), root=tmp_path, memory=memory)
+        assert output["hookSpecificOutput"]["permissionDecision"] == "deny"
+    finally:
+        memory.close()
+
+
+@pytest.mark.skipif(os.name == "nt" or shutil.which("sh") is None, reason="POSIX shebang side-effect reproduction")
+@pytest.mark.parametrize("command,script", [("./X --yes", "X"), ("cd scripts && ./X --yes", "scripts/X")])
+def test_real_direct_script_stops_before_side_effect(tmp_path, command, script):
+    memory, _ = _supervised_memory(tmp_path, release_argv=["python", script])
+    try:
+        executable = tmp_path / script
+        executable.parent.mkdir(parents=True, exist_ok=True)
+        executable.write_text(f"#!/usr/bin/env python3\nfrom pathlib import Path\nPath({str(tmp_path / 'released.txt')!r}).write_text('local fixture')\n", encoding="utf-8")
         executable.chmod(0o700)
-        event = _event(memory, "./X --yes")
+        event = _event(memory, command)
         output = _handle_event(event, root=tmp_path, memory=memory)
         denied = bool(output and output.get("hookSpecificOutput", {}).get("permissionDecision") == "deny")
         if not denied:
