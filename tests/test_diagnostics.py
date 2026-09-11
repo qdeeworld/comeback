@@ -23,8 +23,9 @@ def _write_hook(repo: Path, monkeypatch) -> None:
     capability = tools / ("comeback.exe" if os.name == "nt" else "comeback")
     hook.write_text("hook\n", encoding="utf-8")
     capability.write_text("capability\n", encoding="utf-8")
-    if os.name == "nt":
-        (tools / "python.exe").write_text("interpreter fixture\n", encoding="utf-8")
+    (tools / ("python.exe" if os.name == "nt" else "python")).write_text(
+        "interpreter fixture\n", encoding="utf-8"
+    )
     if os.name != "nt":
         hook.chmod(0o755)
         capability.chmod(0o755)

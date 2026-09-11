@@ -40,6 +40,7 @@ def _hook_executables(root: Path) -> Path:
     executable = root / "comeback-hook"
     executable.write_text("#!/bin/sh\n", encoding="utf-8")
     (root / "comeback").write_text("#!/bin/sh\n", encoding="utf-8")
+    (root / "python").write_text("", encoding="utf-8")
     return executable
 
 
@@ -57,6 +58,7 @@ def test_install_is_idempotent_and_preserves_other_hooks(tmp_path: Path):
     executable = tmp_path / "comeback-hook"
     executable.write_text("#!/bin/sh\n", encoding="utf-8")
     (tmp_path / "comeback").write_text("#!/bin/sh\n", encoding="utf-8")
+    (tmp_path / "python").write_text("", encoding="utf-8")
     hooks_path = tmp_path / ".codex" / "hooks.json"
     hooks_path.parent.mkdir(parents=True)
     hooks_path.write_text(
@@ -128,17 +130,18 @@ def test_install_is_idempotent_and_preserves_other_hooks(tmp_path: Path):
     assert pretool[0]["hooks"] == [
         {"type": "command", "command": "other-policy"}
     ]
-    assert "comeback-hook" in pretool[1]["hooks"][0]["command"]
+    assert "comeback.hook" in pretool[1]["hooks"][0]["command"]
     cli_executable = str(cli_executable_for_hook(executable))
+    launcher = [str(executable.resolve().with_name("python")), "-I", "-m", "comeback.hook"]
     assert shlex.split(pretool[1]["hooks"][0]["command"], posix=True) == [
-        str(executable.resolve()),
+        *launcher,
         "--agent-family",
         "Codex",
         "--cli-executable",
         cli_executable,
     ]
     assert pretool[1]["hooks"][0]["commandWindows"] == _windows_hook_command(
-        str(executable.resolve()),
+        *launcher,
         "--agent-family",
         "Codex",
         "--cli-executable",
@@ -148,7 +151,7 @@ def test_install_is_idempotent_and_preserves_other_hooks(tmp_path: Path):
     assert claude_pretool[0]["hooks"][0]["command"] == "other-claude-policy"
     assert "commandWindows" not in claude_pretool[1]["hooks"][0]
     assert shlex.split(claude_pretool[1]["hooks"][0]["command"], posix=True) == [
-        str(executable.resolve()),
+        *launcher,
         "--agent-family",
         "ClaudeCode",
         "--cli-executable",

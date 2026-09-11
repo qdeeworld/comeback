@@ -28,8 +28,7 @@ def configured_fixture(tmp_path, monkeypatch, agent):
     cli.write_text("fixture capability", encoding="utf-8")
     hook.chmod(0o755)
     cli.chmod(0o755)
-    if os.name == "nt":
-        (tools / "python.exe").write_text("fixture interpreter", encoding="utf-8")
+    (tools / ("python" + suffix)).write_text("fixture interpreter", encoding="utf-8")
     monkeypatch.setattr(diagnostics, "resolve_hook_executable", lambda **_kwargs: hook)
     monkeypatch.setattr(
         diagnostics, "repository_configuration",

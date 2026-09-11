@@ -1411,6 +1411,28 @@ class InterventionMemory:
 
     def get_verified_run(self, session_id: str) -> dict[str, Any]:
         run = self.get_run(session_id)
+        if run["status"] in {"completed", "failed"}:
+            # A release outcome advances every bound lesson's revision and can
+            # retire approval, so a closed run no longer matches live lesson
+            # state. Its closure is instead corroborated by the outcome those
+            # lessons recorded for this session, or by a reconciliation whose
+            # signature and binding validate_run and get_run already checked.
+            if run.get("reconciliation") is None:
+                try:
+                    lessons = [
+                        validate_lesson(
+                            self.client.get_entity(self.LESSON_CATEGORY, lesson_id).get("body")
+                        )
+                        for lesson_id in run["lesson_ids"]
+                    ]
+                except NotFoundError as exc:
+                    raise MemoryIntegrityError("closed supervision run binds a missing lesson") from exc
+                if not lessons or any(
+                    lesson["applied_release_outcomes"].get(session_id) != run["outcome"]
+                    for lesson in lessons
+                ):
+                    raise MemoryIntegrityError("closed supervision run has no matching lesson outcome")
+            return run
         lessons = self.matching_lessons(
             run["task_class"], run["area"], run["agent_family"]
         )

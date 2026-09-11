@@ -5,11 +5,14 @@ import json
 import shlex
 import subprocess
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
+from eth_account import Account
+from eth_account.messages import encode_defunct
 
-from comeback.execution import execute_checkpoint
+from comeback.execution import execute_checkpoint, execute_release, reconcile_release
 from comeback.hook import _handle_event, capability_invocation, main
 from comeback.memory import InterventionMemory
 from comeback.policy import (
@@ -20,6 +23,7 @@ from comeback.policy import (
     invokes_configured_argv,
     is_release_action,
 )
+from comeback.signing import reconciliation_fields, reconciliation_message
 from test_execution import _approve, _supervised_memory
 
 
@@ -345,6 +349,101 @@ def test_deleted_run_cannot_silently_disable_stop_supervision(tmp_path, stop_hoo
             reason = output["reason"]
         assert "no Sibyl supervision run exists" in reason
         assert "fresh session" in reason
+    finally:
+        memory.close()
+
+
+@pytest.mark.parametrize("status,outcome", [("completed", "success"), ("failed", "failure")])
+def test_unsigned_closed_status_cannot_end_stop_supervision(tmp_path, status, outcome):
+    memory, _ = _supervised_memory(tmp_path)
+    try:
+        run = memory.get_run("fresh")
+        run.update(status=status, outcome=outcome)
+        memory.client.set_entity(memory.RUN_CATEGORY, "fresh", run, status=status)
+        event = _event(memory, "")
+        event["hook_event_name"] = "Stop"
+        output = _handle_event(event, root=tmp_path, memory=memory)
+        assert output["decision"] == "block"
+        assert "no matching lesson outcome" in output["reason"]
+    finally:
+        memory.close()
+
+
+def test_closed_run_bound_to_a_missing_lesson_blocks_instead_of_crashing(tmp_path):
+    memory, _ = _supervised_memory(tmp_path)
+    try:
+        run = memory.get_run("fresh")
+        run.update(status="completed", outcome="success", lesson_ids=["missing"], lesson_revisions={"missing": 1})
+        memory.client.set_entity(memory.RUN_CATEGORY, "fresh", run, status="completed")
+        event = _event(memory, "")
+        event["hook_event_name"] = "Stop"
+        output = _handle_event(event, root=tmp_path, memory=memory)
+        assert output["decision"] == "block"
+        assert "missing lesson" in output["reason"]
+    finally:
+        memory.close()
+
+
+def test_genuinely_completed_release_still_stops_normally(tmp_path):
+    memory, owner = _supervised_memory(tmp_path)
+    try:
+        execute_checkpoint(memory, session_id="fresh", root=tmp_path)
+        _approve(memory, owner)
+        execute_release(memory, session_id="fresh", root=tmp_path)
+        assert memory.get_run("fresh")["status"] == "completed"
+        event = _event(memory, "")
+        event["hook_event_name"] = "Stop"
+        assert _handle_event(event, root=tmp_path, memory=memory) is None
+    finally:
+        memory.close()
+
+
+def test_owner_reconciled_release_still_stops_normally(tmp_path):
+    memory, owner = _supervised_memory(tmp_path, release_argv=[sys.executable, "-c", "raise SystemExit(1)"])
+    try:
+        execute_checkpoint(memory, session_id="fresh", root=tmp_path)
+        _approve(memory, owner)
+        execute_release(memory, session_id="fresh", root=tmp_path)
+        run = memory.get_run("fresh")
+        assert run["status"] == "unknown"
+        event = _event(memory, "")
+        event["hook_event_name"] = "Stop"
+        assert "operator reconciliation is required" in _handle_event(event, root=tmp_path, memory=memory)["reason"]
+        resolved_at = datetime.now(timezone.utc).isoformat()
+        signature = Account.sign_message(
+            encode_defunct(text=reconciliation_message(run, "not_released", resolved_at)), private_key=owner.key
+        ).signature.hex()
+        reconcile_release(memory, session_id="fresh", root=tmp_path, resolution="not_released", resolved_at=resolved_at, signature=signature)
+        assert memory.get_run("fresh")["status"] == "failed"
+        assert _handle_event(event, root=tmp_path, memory=memory) is None
+    finally:
+        memory.close()
+
+
+@pytest.mark.parametrize("closer_signs", [False, True])
+def test_closed_run_reconciliation_must_be_signed_by_the_authorized_closer(tmp_path, closer_signs):
+    memory, owner = _supervised_memory(tmp_path)
+    try:
+        run = memory.get_run("fresh")
+        signer = owner if closer_signs else Account.create()
+        resolved_at = datetime.now(timezone.utc).isoformat()
+        signature = Account.sign_message(
+            encode_defunct(text=reconciliation_message(run, "not_released", resolved_at)), private_key=signer.key
+        ).signature.hex()
+        reconciliation = {
+            "resolution": "not_released", "resolved_at": resolved_at, "signer": signer.address.lower(),
+            "signature": signature, "signed_fields": reconciliation_fields(run, "not_released", resolved_at),
+        }
+        run.update(status="failed", outcome="failure", outcome_reason="reserved_release_never_started", reconciliation=reconciliation)
+        memory.client.set_entity(memory.RUN_CATEGORY, "fresh", run, status="failed")
+        event = _event(memory, "")
+        event["hook_event_name"] = "Stop"
+        output = _handle_event(event, root=tmp_path, memory=memory)
+        if closer_signs:
+            assert output is None
+        else:
+            assert output["decision"] == "block"
+            assert "not signed by the authorized closer" in output["reason"]
     finally:
         memory.close()
 
