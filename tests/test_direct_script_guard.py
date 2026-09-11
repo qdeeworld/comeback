@@ -66,6 +66,10 @@ def test_direct_script_refusal_does_not_guess_other_programs(tmp_path, command, 
     "env --chdir=scripts ./X", "sudo -D scripts ./X",
     "cd scripts && python X",
     "eval 'cd scripts'; ./X", "env -Cscripts ./X",
+    "command cd scripts && ./X", "command -p cd scripts && ./X",
+    "command -- cd scripts && ./X", "command command cd scripts && ./X",
+    "builtin cd scripts && ./X", "command eval 'cd scripts'; ./X",
+    "command eval 'cd scripts; ./X'",
 ])
 def test_directory_changes_cannot_hide_a_known_script(tmp_path, command):
     memory, _ = _supervised_memory(tmp_path, release_argv=["python", "scripts/X"])
@@ -77,7 +81,10 @@ def test_directory_changes_cannot_hide_a_known_script(tmp_path, command):
         memory.close()
 
 
-@pytest.mark.parametrize("command", ["cd scripts && cat X", "cd scripts && ./Y", "cd scripts && {other_absolute}"])
+@pytest.mark.parametrize("command", [
+    "cd scripts && cat X", "cd scripts && ./Y", "cd scripts && {other_absolute}",
+    "command -v cd; ./X", "command -V cd; ./X",
+])
 def test_directory_uncertainty_does_not_match_unrelated_actions(tmp_path, command):
     command = command.format(other_absolute=shlex.quote(str(tmp_path / "unrelated" / "X")))
     assert not detects_configured_argv(command, ["python", "scripts/X"], working_directory=tmp_path)
@@ -97,11 +104,13 @@ def test_refusal_tokenizer_can_preserve_windows_backslashes():
     (r"Set-Location scripts; .\X", "scripts/X"),
     (r"pwsh -Command 'cd scripts; .\X'", "scripts/X"),
     (r"cd scripts && .\x", "scripts/X"),
+    ("& {drive}X", "X"), ("{drive}X --yes", "X"),
+    ("cd scripts; & {drive}X", "scripts/X"),
 ])
 def test_native_windows_direct_paths_reach_hook_denial(tmp_path, command, script):
     memory, _ = _supervised_memory(tmp_path, release_argv=["python", script])
     try:
-        command = command.format(absolute=str(tmp_path / "X"))
+        command = command.format(absolute=str(tmp_path / "X"), drive=tmp_path.drive)
         assert detects_configured_argv(command, ["python", script], working_directory=tmp_path)
         output = _handle_event(_event(memory, command), root=tmp_path, memory=memory)
         assert output["hookSpecificOutput"]["permissionDecision"] == "deny"
@@ -110,7 +119,10 @@ def test_native_windows_direct_paths_reach_hook_denial(tmp_path, command, script
 
 
 @pytest.mark.skipif(os.name == "nt" or shutil.which("sh") is None, reason="POSIX shebang side-effect reproduction")
-@pytest.mark.parametrize("command,script", [("./X --yes", "X"), ("cd scripts && ./X --yes", "scripts/X")])
+@pytest.mark.parametrize("command,script", [
+    ("./X --yes", "X"), ("cd scripts && ./X --yes", "scripts/X"),
+    ("command cd scripts && ./X --yes", "scripts/X"),
+])
 def test_real_direct_script_stops_before_side_effect(tmp_path, command, script):
     memory, _ = _supervised_memory(tmp_path, release_argv=["python", script])
     try:

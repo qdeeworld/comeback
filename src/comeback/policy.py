@@ -164,6 +164,7 @@ def _wrapper_tail(executable: str, words: list[str]) -> list[str] | None:
         "exec": {"-a"},
         "timeout": {"-s", "--signal", "-k", "--kill-after"},
         "command": set(),
+        "builtin": set(),
         "nohup": set(),
     }
     flag_options = {
@@ -172,6 +173,7 @@ def _wrapper_tail(executable: str, words: list[str]) -> list[str] | None:
         "exec": {"-c", "-l"},
         "timeout": {"--preserve-status", "--foreground", "--verbose"},
         "command": {"-p"},
+        "builtin": set(),
         "nohup": set(),
     }
     if executable not in value_options:
@@ -658,6 +660,17 @@ def _interpreter_entrypoint(executable: str, arguments: list[str]) -> tuple[str,
     return None
 
 
+def _segment_changes_directory(words: list[str]) -> bool:
+    index = _command_index(words)
+    if index >= len(words):
+        return False
+    executable = _executable_name(words[index])
+    if executable in {"cd", "chdir", "pushd", "popd", "set-location", "sl", "eval", "iex", "invoke-expression"}:
+        return True
+    wrapper = _wrapper_tail(executable, words[index + 1:])
+    return wrapper is not None and _segment_changes_directory(wrapper)
+
+
 def _segments_invoke_configured(
     words: list[str], argv: list[str], working_directory: str | Path | None,
     *, directory_uncertain: bool = False, preserve_backslashes: bool = False,
@@ -679,7 +692,7 @@ def _segments_invoke_configured(
             preserve_backslashes=preserve_backslashes,
         ):
             return True
-        if executable in {"eval", "iex", "invoke-expression"}:
+        if _segment_changes_directory(segment):
             directory_uncertain = True
     return False
 
@@ -747,7 +760,11 @@ def _segment_invokes_configured(
         # A known interpreter script may also be executable through its shebang.
         # Recognize the same explicit path for refusal, without reading scripts,
         # resolving arbitrary PATH aliases, or widening capability authorization.
-        if _interpreter_family(expected) and ("/" in words[0] or "\\" in words[0]):
+        explicit_path = (
+            "/" in words[0] or "\\" in words[0]
+            or (os.name == "nt" and bool(Path(words[0]).drive))
+        )
+        if _interpreter_family(expected) and explicit_path:
             try:
                 entry = _interpreter_entrypoint(expected, argv[1:])
             except CommandParseError:
