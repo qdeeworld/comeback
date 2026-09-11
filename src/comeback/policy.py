@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import re
 import shlex
 from pathlib import Path, PurePath
@@ -84,8 +85,12 @@ def comeback_capability_action(event: dict[str, Any]) -> str | None:
     return next(iter(actions)) if len(actions) == 1 else ("multiple" if actions else None)
 
 
-def _shell_words(command: str) -> list[str]:
+def _shell_words(command: str, *, preserve_backslashes: bool = False) -> list[str]:
     lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|\n(){}")
+    if preserve_backslashes:
+        # Used only by the refusal detector's additional Windows spelling pass.
+        # The default POSIX tokenizer and exact authorization stay unchanged.
+        lexer.escape = ""
     # Keep unquoted newlines as command separators while shlex still preserves
     # a newline inside quotes as part of the quoted argument.
     lexer.whitespace = " \t\r"
@@ -159,6 +164,7 @@ def _wrapper_tail(executable: str, words: list[str]) -> list[str] | None:
         "exec": {"-a"},
         "timeout": {"-s", "--signal", "-k", "--kill-after"},
         "command": set(),
+        "builtin": set(),
         "nohup": set(),
     }
     flag_options = {
@@ -167,6 +173,7 @@ def _wrapper_tail(executable: str, words: list[str]) -> list[str] | None:
         "exec": {"-c", "-l"},
         "timeout": {"--preserve-status", "--foreground", "--verbose"},
         "command": {"-p"},
+        "builtin": set(),
         "nohup": set(),
     }
     if executable not in value_options:
@@ -528,9 +535,14 @@ def detects_configured_argv(
         pass
     if candidate in renderings:
         return True
-    if any(_segment_invokes_configured(segment, argv, working_directory)
-           for segment in _command_segments(words)):
+    if _segments_invoke_configured(words, argv, working_directory):
         return True
+    if os.name == "nt" and "\\" in candidate:
+        if _segments_invoke_configured(
+            _shell_words(candidate, preserve_backslashes=True), argv,
+            working_directory, preserve_backslashes=True,
+        ):
+            return True
     for posix in (True, False):
         try:
             if shlex.split(candidate, posix=posix) == argv:
@@ -648,8 +660,74 @@ def _interpreter_entrypoint(executable: str, arguments: list[str]) -> tuple[str,
     return None
 
 
+def _explicit_script_path(word: str) -> bool:
+    return "/" in word or "\\" in word or (os.name == "nt" and bool(Path(word).drive))
+
+
+def _segment_changes_directory(words: list[str]) -> bool:
+    index = _command_index(words)
+    if index >= len(words):
+        return False
+    # PowerShell module qualification is not an executable filesystem path.
+    # Limit this exception to the known management module's location cmdlets.
+    qualified = words[index].casefold().split("\\")
+    if len(qualified) == 2 and qualified[0] == "microsoft.powershell.management" and qualified[1] in {
+        "set-location", "push-location", "pop-location",
+    }:
+        return True
+    if _explicit_script_path(words[index]):
+        return False  # An external ./cd is not the current shell's cd builtin.
+    executable = _executable_name(words[index])
+    if executable in {
+        "cd", "chdir", "pushd", "popd", "push-location", "pop-location",
+        "set-location", "sl", "eval", "iex", "invoke-expression",
+    }:
+        return True
+    wrapper = _wrapper_tail(executable, words[index + 1:])
+    return wrapper is not None and _segment_changes_directory(wrapper)
+
+
+def _segments_invoke_configured(
+    words: list[str], argv: list[str], working_directory: str | Path | None,
+    *, directory_uncertain: bool = False, preserve_backslashes: bool = False,
+) -> bool:
+    for segment in _command_segments(words):
+        index = _command_index(segment)
+        if index >= len(segment):
+            continue
+        if _segment_invokes_configured(
+            segment, argv, working_directory,
+            directory_uncertain=directory_uncertain,
+            preserve_backslashes=preserve_backslashes,
+        ):
+            return True
+        if _segment_changes_directory(segment):
+            # Do not simulate shell directory stacks, conditional success or
+            # expansion. Later same-named relative scripts are uncertain.
+            directory_uncertain = True
+    return False
+
+
+def _configured_script_path_matches(
+    actual: str, expected: str, working_directory: str | Path | None,
+    *, directory_uncertain: bool,
+) -> bool:
+    root = Path(working_directory) if working_directory is not None else Path.cwd()
+    try:
+        actual_path, expected_path = Path(actual), Path(expected)
+        actual_name, expected_name = actual_path.name, expected_path.name
+        if os.name == "nt":
+            actual_name, expected_name = actual_name.casefold(), expected_name.casefold()
+        if directory_uncertain and not actual_path.is_absolute() and actual_name == expected_name:
+            return True
+        return (root / actual_path).resolve() == (root / expected_path).resolve()
+    except (OSError, ValueError) as exc:
+        raise CommandParseError("configured script identity cannot be resolved") from exc
+
+
 def _segment_invokes_configured(
-    words: list[str], argv: list[str], working_directory: str | Path | None
+    words: list[str], argv: list[str], working_directory: str | Path | None,
+    *, directory_uncertain: bool = False, preserve_backslashes: bool = False,
 ) -> bool:
     if not words or not argv:
         return False
@@ -658,21 +736,48 @@ def _segment_invokes_configured(
         return False
     words = words[index:]
     executable = _executable_name(words[0])
+    expected = _executable_name(argv[0])
+    # Explicit configured script identity wins over basename-based dispatch.
+    # ./cd, ./bash and ./python may be scripts, not builtins/interpreters.
+    if _interpreter_family(expected) and _explicit_script_path(words[0]):
+        try:
+            entry = _interpreter_entrypoint(expected, argv[1:])
+        except CommandParseError:
+            entry = None
+        if entry is not None and entry[0] == "script" and _configured_script_path_matches(
+            words[0], entry[1], working_directory,
+            directory_uncertain=directory_uncertain,
+        ):
+            return True
     wrapper = _wrapper_tail(executable, words[1:])
     if wrapper is not None:
-        return _segment_invokes_configured(wrapper, argv, working_directory)
+        directory_options = {
+            "env": {"-C", "--chdir"},
+            "sudo": {"-D", "--chdir", "-R", "--chroot"},
+        }.get(executable, set())
+        changes_directory = any(
+            word == option or word.startswith(option + "=")
+            or (len(option) == 2 and word.startswith(option) and len(word) > 2)
+            for word in words[1:len(words) - len(wrapper)] for option in directory_options
+        )
+        return _segment_invokes_configured(
+            wrapper, argv, working_directory,
+            directory_uncertain=directory_uncertain or changes_directory,
+            preserve_backslashes=preserve_backslashes,
+        )
     if executable in _SHELLS:
         payload = _shell_payload(executable, words, [_clean_word(word) for word in words], 0)
-        return payload is not None and any(
-            _segment_invokes_configured(segment, argv, working_directory)
-            for segment in _command_segments(_shell_words(payload))
+        return payload is not None and _segments_invoke_configured(
+            _shell_words(payload, preserve_backslashes=preserve_backslashes),
+            argv, working_directory, directory_uncertain=directory_uncertain,
+            preserve_backslashes=preserve_backslashes,
         )
     if executable in {"eval", "iex", "invoke-expression"}:
-        return any(
-            _segment_invokes_configured(segment, argv, working_directory)
-            for segment in _command_segments(_shell_words(" ".join(words[1:])))
+        return _segments_invoke_configured(
+            _shell_words(" ".join(words[1:]), preserve_backslashes=preserve_backslashes),
+            argv, working_directory, directory_uncertain=directory_uncertain,
+            preserve_backslashes=preserve_backslashes,
         )
-    expected = _executable_name(argv[0])
     family = _interpreter_family(executable)
     if executable != expected and not (family and family == _interpreter_family(expected)):
         return False
@@ -689,11 +794,10 @@ def _segment_invokes_configured(
             return False
         if expected_entry[0] == "module":
             return expected_entry[1] == actual_entry[1]
-        root = Path(working_directory) if working_directory is not None else Path.cwd()
-        try:
-            return (root / actual_entry[1]).resolve() == (root / expected_entry[1]).resolve()
-        except (OSError, ValueError) as exc:
-            raise CommandParseError("configured script identity cannot be resolved") from exc
+        return _configured_script_path_matches(
+            actual_entry[1], expected_entry[1], working_directory,
+            directory_uncertain=directory_uncertain,
+        )
     return False
 
 

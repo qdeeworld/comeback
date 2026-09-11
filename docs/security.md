@@ -16,6 +16,8 @@ Hooks, the supervisor installation, selected environment and repository identity
 
 Windows runners use Job Objects; POSIX runners use process groups. A deliberately detached descendant can escape POSIX process-group containment, so this is not an absolute guarantee that every descendant has stopped. Keep the control files on a supported local filesystem: synced/network filesystems, unsupported hardlinks and Windows path limits can prevent operation. A failed or unknown action must be reconciled, never retried just to complete a demo.
 
+For a configured Python or Node script, the raw-command guard also refuses direct execution through an explicit path (for example, `./release_task` instead of `python release_task`). Windows path spellings are checked without discarding backslashes. After a recognized directory-changing prefix, a relative script with the configured filename is conservatively refused because its location is uncertain; unrelated reads remain permitted. Bare command names are not assumed to identify a local script. This is refusal only: it does not authorize equivalent commands or inspect shebangs, arbitrary wrapper contents, or all PATH aliases. The configured capability remains the only supported execution route under supervision.
+
 ## Successful execution versus external outcome
 
 A successful capability process is not independent proof of a new deployment or changed destination. For example, an up-to-date Git push may complete successfully without creating a second release. Check the actual destination before describing an external result, and follow [reconciliation](workflows.md#unknown-release-outcomes-and-reconciliation) when an outcome is uncertain.
