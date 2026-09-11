@@ -675,6 +675,20 @@ def _segment_invokes_configured(
     expected = _executable_name(argv[0])
     family = _interpreter_family(executable)
     if executable != expected and not (family and family == _interpreter_family(expected)):
+        # A known interpreter script may also be executable through its shebang.
+        # Recognize the same explicit path for refusal, without reading scripts,
+        # resolving arbitrary PATH aliases, or widening capability authorization.
+        if _interpreter_family(expected):
+            try:
+                entry = _interpreter_entrypoint(expected, argv[1:])
+            except CommandParseError:
+                entry = None  # An unknown signed option does not identify a script.
+            if entry is not None and entry[0] == "script":
+                root = Path(working_directory) if working_directory is not None else Path.cwd()
+                try:
+                    return (root / words[0]).resolve() == (root / entry[1]).resolve()
+                except (OSError, ValueError) as exc:
+                    raise CommandParseError("configured script identity cannot be resolved") from exc
         return False
     # Added arguments cannot turn a known entry point into an unprotected one.
     # This broadens refusal only, not the exact one-shot authorization grammar.
