@@ -1,3 +1,4 @@
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -33,9 +34,10 @@ def test_windows_launchers_share_isolated_environment(tmp_path):
     assert "comeback.exe" not in command
 
 
-def test_missing_interpreter_never_falls_back_to_path(tmp_path):
+@pytest.mark.parametrize("name", ["comeback.exe", "comeback"])
+def test_missing_interpreter_never_falls_back_to_path(tmp_path, name):
     with pytest.raises(RuntimeError, match="environment interpreter"):
-        launcher_argv(tmp_path / "comeback.exe", "comeback.cli")
+        launcher_argv(tmp_path / name, "comeback.cli")
 
 
 def test_discovery_prefers_running_environment_over_exposed_uv_stub(tmp_path, monkeypatch):
@@ -80,9 +82,35 @@ def test_preflight_success(tmp_path, monkeypatch):
     preflight_launcher(hook)
 
 
-def test_posix_launcher_unchanged(tmp_path):
-    path = tmp_path / "comeback"
-    assert launcher_argv(path, "comeback.cli") == [str(path)]
+def posix_environment(tmp_path):
+    directory = tmp_path / "space dir" / "bin"
+    directory.mkdir(parents=True)
+    for name in ("python", "comeback-hook", "comeback"):
+        (directory / name).touch()
+    return directory / "comeback-hook"
+
+
+def test_posix_launchers_share_isolated_environment(tmp_path):
+    hook = posix_environment(tmp_path)
+    python = str(hook.with_name("python"))
+    assert launcher_argv(hook, "comeback.hook") == [python, "-I", "-m", "comeback.hook"]
+    for groups in (claude_hook_groups(hook), hook_groups(hook)):
+        handler = groups["PreToolUse"][0]["hooks"][0]
+        assert "comeback.hook" in handler["command"]
+        assert _is_comeback_handler(handler)
+    event = {"_comeback_cli_executable": str(hook.with_name("comeback")),
+             "_comeback_memory_db": str(tmp_path / "memory.db"),
+             "_comeback_agent_family": "ClaudeCode"}
+    command = capability_invocation(event, "checkpoint", "fresh")
+    assert command.startswith(shlex.join([python, "-I", "-m", "comeback.cli"]))
+    assert "comeback-hook" not in command
+
+
+def test_programmatic_capability_fallback_is_isolated(tmp_path):
+    event = {"_comeback_memory_db": str(tmp_path / "memory.db"),
+             "_comeback_agent_family": "ClaudeCode"}
+    command = capability_invocation(event, "release", "fresh")
+    assert command.startswith(shlex.join([sys.executable, "-I", "-m", "comeback.cli"]))
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="native Windows interpreter route")

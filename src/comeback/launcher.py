@@ -6,7 +6,12 @@ import subprocess
 def launcher_argv(executable: Path, module: str) -> list[str]:
     executable = executable.expanduser().absolute()
     if executable.suffix.lower() != ".exe":
-        return [str(executable)]
+        # A POSIX console script would start without -I, so PYTHONPATH, the
+        # user site or the repository could shadow Comeback's own modules.
+        python = executable.with_name("python")
+        if not python.is_file():
+            raise RuntimeError(f"Comeback launcher requires its environment interpreter: {python}")
+        return [str(python), "-I", "-m", module]
     # Windows console-script stubs have per-install hashes and can be rejected
     # independently by application control. Use the SAME environment's Python,
     # never a PATH fallback. Isolation prevents repository module shadowing.

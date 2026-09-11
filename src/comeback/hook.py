@@ -65,7 +65,7 @@ def capability_invocation(
     else:
         # Programmatic callers and the deterministic harness do not enter through
         # the installed console hook. Keep their launcher exact as well.
-        argv = [sys.executable, "-m", "comeback.cli"]
+        argv = [sys.executable, "-I", "-m", "comeback.cli"]
     selected_database = event.get("_comeback_memory_db")
     if not isinstance(selected_database, str) or not selected_database:
         raise MemoryIntegrityError("hook has no selected Sibyl memory database")
